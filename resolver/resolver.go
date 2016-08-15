@@ -84,8 +84,11 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth str
 		return nil, err
 	}
 	if !dontVerifySig && rr.useDNSSEC {
-		if err = rr.verifyRRSIG(ctx, q.Name, r.Answer, auth, nil); err != nil {
-			return nil, err
+		for _, section := range [][]dns.RR{r.Answer, r.Ns, r.Extra} {
+			km := make(map[uint16]*dns.DNSKEY)
+			if err = rr.verifyRRSIG(ctx, q.Name, section, auth, km); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return r, nil

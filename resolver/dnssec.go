@@ -2,7 +2,7 @@ package resolver
 
 import (
 	"errors"
-	// "fmt"
+	"fmt"
 	"time"
 
 	"github.com/miekg/dns"
@@ -43,27 +43,39 @@ func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, name string, keyt
 	// for _, k range := zskMap {
 	//
 	// }
-	if err = rr.verifyRRSIG(ctx, name, r.Answer, auth, keyMap); err != nil {
-		return nil, err
+	for i, section := range [][]dns.RR{r.Answer, r.Ns, r.Extra} {
+		fmt.Println("SECTION", i)
+		if err = rr.verifyRRSIG(ctx, name, section, auth, keyMap); err != nil {
+			return nil, err
+		}
 	}
 	return keyMap, nil
 }
 
 func (rr *RecursiveResolver) verifyRRSIG(ctx context.Context, name string, answer []dns.RR, auth string, keyMap map[uint16]*dns.DNSKEY) error {
+	if len(answer) == 0 {
+		return nil
+	}
 	var sig *dns.RRSIG
 	var rest []dns.RR
 	for _, r := range answer {
 		if sig == nil && r.Header().Rrtype == dns.TypeRRSIG {
 			sig = r.(*dns.RRSIG)
-		} else {
-			rest = append(rest, r)
+			break
 		}
 	}
 	if sig == nil {
 		return nil
 	}
-	if keyMap == nil {
-		km, err := rr.lookupDNSKEY(ctx, name, sig.KeyTag, auth)
+	for _, r := range answer {
+		if r.Header().Rrtype == sig.TypeCovered && r.Header().Name == sig.Header().Name {
+			rest = append(rest, r)
+		}
+	}
+	// fmt.Println("YO", *sig)
+	// fmt.Println(rest)
+	if len(keyMap) == 0 {
+		km, err := rr.lookupDNSKEY(ctx, sig.SignerName, sig.KeyTag, auth)
 		if err != nil {
 			return err
 		}
@@ -73,10 +85,12 @@ func (rr *RecursiveResolver) verifyRRSIG(ctx context.Context, name string, answe
 	if !present {
 		return errNoDNSKEY
 	}
+	fmt.Println("HERE?", sig, rest)
 	err := sig.Verify(k, rest)
 	if err != nil {
 		return err
 	}
+	// fmt.Println("YUP")
 	if !sig.ValidityPeriod(time.Time{}) {
 		return errInvalidSignaturePeriod
 	}
