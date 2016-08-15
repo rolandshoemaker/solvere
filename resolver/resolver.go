@@ -25,8 +25,8 @@ var (
 	dnsPort = "53"
 
 	errTooManyIterations  = errors.New("Too many iterations")
-	errNoNSAuthorties     = errors.New("No NS authority records provided")
-	errNoAuthorityAddress = errors.New("No A/AAAA records provided for the chosen authority")
+	errNoNSAuthorties     = errors.New("No NS authority records found")
+	errNoAuthorityAddress = errors.New("No A/AAAA records found for the chosen authority")
 )
 
 type authMap map[string][]string
@@ -39,7 +39,7 @@ func buildAuthMap(auths []dns.RR, extras []dns.RR) *authMap {
 			am[ns.Hdr.Name] = append(am[ns.Hdr.Name], ns.Ns)
 		}
 	}
-	return am
+	return &am
 }
 
 type Answer struct {
@@ -50,19 +50,21 @@ type Answer struct {
 }
 
 type RecursiveResolver struct {
-	useIPv6 bool
+	useIPv6   bool
+	useDNSSEC bool
 
 	c *dns.Client
 }
 
-func NewRecursiveResolver(useIPv6 bool) *RecursiveResolver {
+func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool) *RecursiveResolver {
 	return &RecursiveResolver{
-		useIPv6: useIPv6,
-		c:       new(dns.Client),
+		useIPv6:   useIPv6,
+		useDNSSEC: useDNSSEC,
+		c:         new(dns.Client),
 	}
 }
 
-func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth string) (*dns.Msg, error) {
+func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth string, dontVerifySig bool) (*dns.Msg, error) {
 	tr := trace.New("resolver-query", fmt.Sprintf("%s -> %s", q.String(), auth))
 	defer tr.Finish()
 	fmt.Printf(
@@ -74,12 +76,19 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth str
 		auth,
 	)
 	m := new(dns.Msg)
+	m.SetEdns0(4096, rr.useDNSSEC)
 	m.Question = []dns.Question{q}
 	r, _, err := rr.c.Exchange(m, net.JoinHostPort(auth, dnsPort))
 	if err != nil {
 		tr.SetError()
+		return nil, err
 	}
-	return r, err
+	if !dontVerifySig && rr.useDNSSEC {
+		if err = rr.verifyRRSIG(ctx, q.Name, r.Answer, auth, nil); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
 }
 
 func (rr *RecursiveResolver) lookupHost(ctx context.Context, name string) (string, error) {
@@ -158,7 +167,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 	}
 
 	for i := 0; i < maxIterations; i++ {
-		r, err := rr.query(ctx, q, authority)
+		r, err := rr.query(ctx, q, authority, false)
 		if err != nil && err != dns.ErrTruncated { // if truncated still try...
 			return nil, err
 		} else if err == dns.ErrTruncated {
