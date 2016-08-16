@@ -2,7 +2,7 @@ package resolver
 
 import (
 	"errors"
-	"fmt"
+	// "fmt"
 	"time"
 
 	"github.com/miekg/dns"
@@ -14,16 +14,15 @@ var (
 	errInvalidSignaturePeriod = errors.New("Incorrect signature validity period")
 )
 
-func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, name string, keytag uint16, auth string) (map[uint16]*dns.DNSKEY, error) {
+func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, keyMap map[uint16]*dns.DNSKEY, name string, keytag uint16, auth string) error {
 	r, err := rr.query(ctx, dns.Question{Name: name, Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}, auth, true)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(r.Answer) == 0 {
-		return nil, errNoDNSKEY
+		return errNoDNSKEY
 	}
 	// var ksk *dns.DNSKEY
-	keyMap := make(map[uint16]*dns.DNSKEY, len(r.Answer))
 	for _, a := range r.Answer {
 		if a.Header().Rrtype == dns.TypeDNSKEY {
 			dnskey := a.(*dns.DNSKEY)
@@ -34,65 +33,48 @@ func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, name string, keyt
 		}
 	}
 	if len(keyMap) == 0 {
-		return nil, errNoDNSKEY
+		return errNoDNSKEY
 	}
 	// if ksk == nil {
 	// 	return nil, errNoDNSKEY // actually no ksk
 	// }
-	// cannot check key has signed key it seems...
-	// for _, k range := zskMap {
-	//
-	// }
-	for i, section := range [][]dns.RR{r.Answer, r.Ns, r.Extra} {
-		fmt.Println("SECTION", i)
+	for _, section := range [][]dns.RR{r.Answer, r.Ns, r.Extra} {
 		if err = rr.verifyRRSIG(ctx, name, section, auth, keyMap); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return keyMap, nil
+	return nil
 }
 
 func (rr *RecursiveResolver) verifyRRSIG(ctx context.Context, name string, answer []dns.RR, auth string, keyMap map[uint16]*dns.DNSKEY) error {
 	if len(answer) == 0 {
 		return nil
 	}
-	var sig *dns.RRSIG
-	var rest []dns.RR
-	for _, r := range answer {
-		if sig == nil && r.Header().Rrtype == dns.TypeRRSIG {
-			sig = r.(*dns.RRSIG)
-			break
-		}
-	}
-	if sig == nil {
+	sigs := extractRRSet(answer, dns.TypeRRSIG, "")
+	if len(sigs) == 0 {
 		return nil
 	}
-	for _, r := range answer {
-		if r.Header().Rrtype == sig.TypeCovered && r.Header().Name == sig.Header().Name {
-			rest = append(rest, r)
+	for _, sigRR := range sigs {
+		sig := sigRR.(*dns.RRSIG)
+		rest := extractRRSet(answer, sig.TypeCovered, sig.Header().Name)
+		if len(keyMap) == 0 {
+			var err error
+			err = rr.lookupDNSKEY(ctx, keyMap, sig.SignerName, sig.KeyTag, auth)
+			if err != nil {
+				return err
+			}
 		}
-	}
-	// fmt.Println("YO", *sig)
-	// fmt.Println(rest)
-	if len(keyMap) == 0 {
-		km, err := rr.lookupDNSKEY(ctx, sig.SignerName, sig.KeyTag, auth)
+		k, present := keyMap[sig.KeyTag]
+		if !present {
+			return errNoDNSKEY
+		}
+		err := sig.Verify(k, rest)
 		if err != nil {
 			return err
 		}
-		keyMap = km
-	}
-	k, present := keyMap[sig.KeyTag]
-	if !present {
-		return errNoDNSKEY
-	}
-	fmt.Println("HERE?", sig, rest)
-	err := sig.Verify(k, rest)
-	if err != nil {
-		return err
-	}
-	// fmt.Println("YUP")
-	if !sig.ValidityPeriod(time.Time{}) {
-		return errInvalidSignaturePeriod
+		if !sig.ValidityPeriod(time.Time{}) {
+			return errInvalidSignaturePeriod
+		}
 	}
 	return nil
 }

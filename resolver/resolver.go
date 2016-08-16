@@ -78,19 +78,58 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth str
 	m := new(dns.Msg)
 	m.SetEdns0(4096, rr.useDNSSEC)
 	m.Question = []dns.Question{q}
+	// XXX: check cache for question
+	// if answer, present := rr.qac.get(&q); present {
+	// 	m.Rcode = dns.RcodeSuccess
+	// 	m.Answer = answer
+	// 	return m, nil
+	// }
 	r, _, err := rr.c.Exchange(m, net.JoinHostPort(auth, dnsPort))
 	if err != nil {
 		tr.SetError()
 		return nil, err
 	}
+	// XXX: should only be checked if the parent zone was signed and had
+	// a DS record
 	if !dontVerifySig && rr.useDNSSEC {
+		km := make(map[uint16]*dns.DNSKEY)
 		for _, section := range [][]dns.RR{r.Answer, r.Ns, r.Extra} {
-			km := make(map[uint16]*dns.DNSKEY)
 			if err = rr.verifyRRSIG(ctx, q.Name, section, auth, km); err != nil {
 				return nil, err
 			}
 		}
+		if len(km) == 0 {
+			// XXX: if DS exists for parent zone this should be a failure
+			return r, nil
+		}
+		// XXX: uncomment once DS chaining is supported
+		// var parentDS *dns.DS // := dns.DS{Algorithm: dns.SHA256, Digest: ""}
+		// if parentDS == nil {
+		// 	return r, nil
+		// }
+		// var ksk *dns.DNSKEY
+		// for _, r := range km {
+		// 	if r.Flags == 257 { // KSK flag...ish?
+		// 		ksk = r
+		// 		break
+		// 	}
+		// }
+		// if ksk == nil {
+		// 	return nil, errors.New("No KSK DNSKEY record found")
+		// }
+		// kskDS := ksk.ToDS(parentDS.Algorithm)
+		// if kskDS == nil {
+		// 	return nil, errors.New("Failed to convert KSK DNSKEY record to DS record")
+		// }
+		// if kskDS.Digest != parentDS.Digest {
+		// 	return nil, errors.New("KSK DNSKEY record does not match DS record from parent zone")
+		// }
 	}
+	// XXX: actually add to cache
+	// if r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
+	//  // XXX: sanitize response answer before adding to cache
+	// 	rr.qac.add(&q, r.Answer)
+	// }
 	return r, nil
 }
 
@@ -107,17 +146,11 @@ func (rr *RecursiveResolver) lookupHost(ctx context.Context, name string) (strin
 	if len(r.Answer) == 0 {
 		return "", errNoAuthorityAddress
 	}
-	addresses := []string{}
-	for _, a := range r.Answer {
-		if a.Header().Rrtype == dns.TypeA {
-			addr := a.(*dns.A)
-			addresses = append(addresses, addr.A.String())
-		}
-	}
+	addresses := extractRRSet(r.Answer, dns.TypeA, name)
 	if len(addresses) == 0 {
 		return "", errNoAuthorityAddress
 	}
-	return addresses[mrand.Intn(len(addresses))], nil
+	return addresses[mrand.Intn(len(addresses))].(*dns.A).A.String(), nil // ewwww
 }
 
 // this seems horribly inefficient, should be re-written..!
@@ -201,4 +234,35 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 		return nil, errors.New("No authority or additional records! IDK") // ???
 	}
 	return nil, errTooManyIterations
+}
+
+func extractRRSet(in []dns.RR, t uint16, name string) []dns.RR {
+	out := []dns.RR{}
+	for _, r := range in {
+		if r.Header().Rrtype == t {
+			if name != "" && name != r.Header().Name {
+				continue
+			}
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func extractAndMapRRSet(in []dns.RR, name string, t ...uint16) map[uint16][]dns.RR {
+	out := make(map[uint16][]dns.RR, len(t))
+	for _, rt := range t {
+		out[rt] = []dns.RR{}
+	}
+	for _, r := range in {
+		rt := r.Header().Rrtype
+		if _, present := out[rt]; !present {
+			continue
+		}
+		if name != "" && name != r.Header().Name {
+			continue
+		}
+		out[rt] = append(out[rt], r)
+	}
+	return out
 }
