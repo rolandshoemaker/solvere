@@ -54,14 +54,22 @@ type RecursiveResolver struct {
 	useDNSSEC bool
 
 	c *dns.Client
+
+	qac *qaCache
+	ac  *authCache
 }
 
 func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool) *RecursiveResolver {
-	return &RecursiveResolver{
+	rr := &RecursiveResolver{
 		useIPv6:   useIPv6,
 		useDNSSEC: useDNSSEC,
 		c:         new(dns.Client),
+		qac:       &qaCache{cache: make(map[[32]byte]*cacheEntry)},
+		ac:        &authCache{cache: make(map[string]*authEntry)},
 	}
+	// XXX: do this properly...
+	rr.ac.add(".", []string{"198.41.0.4"}, 0)
+	return rr
 }
 
 func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth string, dontVerifySig bool) (*dns.Msg, error) {
@@ -79,11 +87,11 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth str
 	m.SetEdns0(4096, rr.useDNSSEC)
 	m.Question = []dns.Question{q}
 	// XXX: check cache for question
-	// if answer, present := rr.qac.get(&q); present {
-	// 	m.Rcode = dns.RcodeSuccess
-	// 	m.Answer = answer
-	// 	return m, nil
-	// }
+	if answer, present := rr.qac.get(&q); present {
+		m.Rcode = dns.RcodeSuccess
+		m.Answer = answer
+		return m, nil
+	}
 	r, _, err := rr.c.Exchange(m, net.JoinHostPort(auth, dnsPort))
 	if err != nil {
 		tr.SetError()
@@ -125,11 +133,11 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth str
 		// 	return nil, errors.New("KSK DNSKEY record does not match DS record from parent zone")
 		// }
 	}
-	// XXX: actually add to cache
-	// if r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
-	//  // XXX: sanitize response answer before adding to cache
-	// 	rr.qac.add(&q, r.Answer)
-	// }
+	// XXX: actually add to cache only after validation!
+	if r.Rcode == dns.RcodeSuccess && len(r.Answer) > 0 {
+		// XXX: sanitize response answer before adding to cache
+		rr.qac.add(&q, r.Answer)
+	}
 	return r, nil
 }
 
@@ -167,7 +175,14 @@ func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, 
 	} else if len(extras) == 0 {
 		return rr.lookupHost(ctx, nameservers[mrand.Intn(len(nameservers))])
 	}
-	// do a quick cache lookup first?
+	go func() {
+		zones, minTTLs := splitAuthsByZone(auths, extras, rr.useIPv6)
+		for z, a := range zones {
+			if len(a) > 0 {
+				rr.ac.add(z, a, minTTLs[z])
+			}
+		}
+	}()
 	for i := 0; i < len(nameservers); i++ {
 		ra := nameservers[mrand.Intn(len(nameservers))]
 		for _, addr := range extras {
@@ -197,10 +212,12 @@ func extractAnswer(m *dns.Msg) *Answer {
 }
 
 func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answer, error) {
-	authority, err := rr.pickAuthority(ctx, rootNames, rootAddrs)
+	// authority, err := rr.pickAuthority(ctx, rootNames, rootAddrs)
+	authority, err := rr.ac.authorityFor(q.Name)
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println("Initial authority:", authority)
 
 	for i := 0; i < maxIterations; i++ {
 		r, err := rr.query(ctx, q, authority, false)
@@ -223,7 +240,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 		}
 
 		// referral
-		if len(r.Ns) > 0 { // XXX: if extra is 0 this should lookup the addr itself... (how?)
+		if len(r.Ns) > 0 {
 			// randomly pick a authority (or something more complicated) and repeat the query.
 			authority, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
 			if err != nil {
