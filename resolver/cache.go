@@ -1,7 +1,7 @@
 package resolver
 
 import (
-	"crypto/sha256"
+	"crypto/sha1"
 	// "fmt"
 	// mrand "math/rand"
 	// "strings"
@@ -11,9 +11,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-func hashQuestion(q *dns.Question) [32]byte {
+func hashQuestion(q *dns.Question) [sha1.Size]byte {
 	inp := append([]byte{uint8(q.Qtype & 0xff), uint8(q.Qtype >> 8), uint8(q.Qclass & 0xff), uint8(q.Qclass >> 8)}, []byte(q.Name)...)
-	return sha256.Sum256(inp)
+	return sha1.Sum(inp)
 }
 
 func minTTL(a []dns.RR) int {
@@ -62,17 +62,17 @@ func (ca *cacheEntry) update(entry *cacheEntry, answer, auth, extra []dns.RR, tt
 type qaCache struct {
 	mu sync.RWMutex
 	// XXX: May want a secondary index of sha256(q.Name, q.Class) for NSEC denial checks...
-	cache map[[32]byte]*cacheEntry
+	cache map[[sha1.Size]byte]*cacheEntry
 }
 
-func (qac *qaCache) del(entry *cacheEntry, id [32]byte) {
+func (qac *qaCache) del(entry *cacheEntry, id [sha1.Size]byte) {
 	qac.mu.Lock()
 	defer qac.mu.Unlock()
 	delete(qac.cache, id)
 	entry.removed = true
 }
 
-func (qac *qaCache) prune(q *dns.Question, id [32]byte, ttl int) {
+func (qac *qaCache) prune(q *dns.Question, id [sha1.Size]byte, ttl int) {
 	sleep := time.Second * time.Duration(ttl)
 	for {
 		time.Sleep(sleep)

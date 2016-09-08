@@ -22,7 +22,7 @@ var (
 func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, zone, auth string, parentDSSet []dns.RR) error {
 	zskMap, kskMap := make(map[uint16]*dns.DNSKEY), make(map[uint16]*dns.DNSKEY)
 	q := dns.Question{Name: zone, Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}
-	r, err := rr.query(ctx, q, auth, zone)
+	r, _, err := rr.query(ctx, q, auth, zone)
 	if err != nil {
 		return err
 	}
