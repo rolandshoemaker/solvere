@@ -20,7 +20,7 @@ var (
 )
 
 func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, zone, auth string, parentDSSet []dns.RR) error {
-	combinedMap, kskMap := make(map[uint16]*dns.DNSKEY), make(map[uint16]*dns.DNSKEY)
+	zskMap, kskMap := make(map[uint16]*dns.DNSKEY), make(map[uint16]*dns.DNSKEY)
 	q := dns.Question{Name: zone, Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}
 	r, err := rr.query(ctx, q, auth, zone)
 	if err != nil {
@@ -34,24 +34,23 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, zone, 
 			dnskey := a.(*dns.DNSKEY)
 			tag := dnskey.KeyTag()
 			if dnskey.Flags == 256 {
-				combinedMap[tag] = dnskey
+				zskMap[tag] = dnskey
 			} else if dnskey.Flags == 257 {
 				kskMap[tag] = dnskey
-				combinedMap[tag] = dnskey
 			}
 		}
 	}
-	if len(kskMap) == 0 || len(combinedMap) == 0 {
+	if len(kskMap) == 0 || len(zskMap) == 0 {
 		return errNoDNSKEY
 	}
 
-	err = rr.verifyRRSIG(m, combinedMap)
+	err = rr.verifyRRSIG(m, zskMap)
 	if err != nil {
 		return err
 	}
 
 	if len(parentDSSet) > 0 {
-		err = rr.verifyRRSIG(r, combinedMap)
+		err = rr.verifyRRSIG(r, kskMap)
 		if err != nil {
 			return err
 		}
