@@ -2,9 +2,9 @@ package resolver
 
 import (
 	"crypto/sha256"
-	"fmt"
-	mrand "math/rand"
-	"strings"
+	// "fmt"
+	// mrand "math/rand"
+	// "strings"
 	"sync"
 	"time"
 
@@ -34,27 +34,34 @@ func minTTL(a []dns.RR) int {
 }
 
 type cacheEntry struct {
-	answer   []dns.RR
-	ttl      int
-	modified time.Time
-	removed  bool
-	mu       sync.Mutex
+	answer        []dns.RR
+	auth          []dns.RR
+	extra         []dns.RR
+	authenticated bool
+	ttl           int
+	modified      time.Time
+	removed       bool
+	mu            sync.Mutex
 }
 
-func (ca *cacheEntry) update(entry *cacheEntry, answer []dns.RR, ttl int) {
+func (ca *cacheEntry) update(entry *cacheEntry, answer, auth, extra []dns.RR, ttl int, authenticated bool) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if entry.removed {
 		return
 	}
 	// just overwrite the previous one...
-	entry.ttl = ttl
 	entry.answer = answer
+	entry.auth = auth
+	entry.extra = extra
+	entry.authenticated = authenticated
+	entry.ttl = ttl
 	entry.modified = time.Now()
 }
 
 type qaCache struct {
-	mu    sync.RWMutex
+	mu sync.RWMutex
+	// XXX: May want a secondary index of sha256(q.Name, q.Class) for NSEC denial checks...
 	cache map[[32]byte]*cacheEntry
 }
 
@@ -74,6 +81,10 @@ func (qac *qaCache) prune(q *dns.Question, id [32]byte, ttl int) {
 			return
 		}
 		entry.mu.Lock()
+		if entry.removed {
+			entry.mu.Unlock()
+			return
+		}
 		new := entry.modified.Add(time.Second * time.Duration(entry.ttl)).Sub(time.Now())
 		if new < 0 {
 			qac.del(entry, id)
@@ -85,17 +96,23 @@ func (qac *qaCache) prune(q *dns.Question, id [32]byte, ttl int) {
 	}
 }
 
-func (qac *qaCache) add(q *dns.Question, a []dns.RR) {
+func (qac *qaCache) add(q *dns.Question, answer, auth, extra []dns.RR, authenticated, forever bool) {
 	id := hashQuestion(q)
-	ttl := minTTL(a)
+	var ttl int
+	if !forever {
+		ttl = minTTL(append(answer, append(auth, extra...)...))
+	}
+	// should filter out OPT records here
 	qac.mu.Lock()
 	defer qac.mu.Unlock()
 	if entry, present := qac.cache[id]; present {
-		qac.cache[id].update(entry, a, ttl)
+		qac.cache[id].update(entry, answer, auth, extra, ttl, authenticated)
 		return
 	}
-	qac.cache[id] = &cacheEntry{a, ttl, time.Now(), false, sync.Mutex{}}
-	go qac.prune(q, id, ttl)
+	qac.cache[id] = &cacheEntry{answer, auth, extra, authenticated, ttl, time.Now(), false, sync.Mutex{}}
+	if ttl > 0 {
+		go qac.prune(q, id, ttl)
+	}
 }
 
 func (qac *qaCache) getEntry(q *dns.Question) (*cacheEntry, bool) {
@@ -118,108 +135,10 @@ func (qac *qaCache) get(q *dns.Question) ([]dns.RR, bool) {
 	return nil, false
 }
 
-type authEntry struct {
-	addrs    []string
-	ttl      int
-	modified time.Time
-	removed  bool
-	mu       sync.Mutex
-}
-
-type authCache struct {
-	cache map[string]*authEntry
-	mu    sync.RWMutex
-}
-
-func (ac *authCache) del(zone string, entry *authEntry) {
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	delete(ac.cache, zone)
-	entry.removed = true
-}
-
-func (ac *authCache) get(zone string) (*authEntry, bool) {
-	ac.mu.RLock()
-	defer ac.mu.RUnlock()
-	if entry, present := ac.cache[zone]; present {
-		entry.mu.Lock()
-		defer entry.mu.Unlock()
-		if entry.removed {
-			return nil, false
-		}
-		return entry, true
-	}
-	return nil, false
-}
-
-func (ac *authCache) prune(zone string, ttl int) {
-	sleep := time.Second * time.Duration(ttl)
-	for {
-		time.Sleep(sleep)
-		entry, present := ac.get(zone)
-		if !present {
-			return
-		}
-		entry.mu.Lock()
-		new := entry.modified.Add(time.Second * time.Duration(entry.ttl)).Sub(time.Now())
-		if new < 0 {
-			ac.del(zone, entry)
-			entry.mu.Unlock()
-			return
-		}
-		entry.mu.Unlock()
-		sleep = new
-	}
-}
-
-func (ac *authCache) update(entry *authEntry, addrs []string, ttl int) {
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.removed {
-		return
-	}
-	entry.addrs = addrs
-	entry.ttl = ttl
-	entry.modified = time.Now()
-}
-
-func (ac *authCache) add(zone string, addrs []string, ttl int) {
-	ac.mu.Lock()
-	defer ac.mu.Unlock()
-	if entry, present := ac.cache[zone]; present {
-		ac.update(entry, addrs, ttl)
-		return
-	}
-	ac.cache[zone] = &authEntry{addrs, ttl, time.Now(), false, sync.Mutex{}}
-	if ttl > 0 { // so root hints stick around forever...
-		go ac.prune(zone, ttl)
-	}
-}
-
-func (ac *authCache) authorityFor(name string) (string, error) {
-	ac.mu.RLock()
-	defer ac.mu.RUnlock()
-
-	labels := strings.Split(name, ".")
-	for i := range labels {
-		zone := strings.Join(labels[i:], ".")
-		if zone == "" {
-			zone = "."
-		}
-		fmt.Println(zone)
-		if entry, present := ac.cache[zone]; present {
-			return entry.addrs[mrand.Intn(len(entry.addrs))], nil
-		}
-	}
-	// if cache has been primed using root hints this should never
-	// happen...
-	return "", errNoNSAuthorties
-}
-
-func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]int) {
+func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]int, map[string]string) {
 	zones := make(map[string][]string)
 	minTTLs := make(map[string]int)
-	nsToZone := make(map[string]string, len(auths))
+	nsToZone := make(map[string]string)
 
 	for _, rr := range auths {
 		if rr.Header().Rrtype == dns.TypeNS {
@@ -245,5 +164,5 @@ func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string
 		}
 	}
 
-	return zones, minTTLs
+	return zones, minTTLs, nsToZone
 }
