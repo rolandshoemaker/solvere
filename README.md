@@ -9,5 +9,6 @@ A simple Golang package and standalone server for recursive DNS resolution.
   - [ ] DNSSEC validation
     - [X] RRSIG validation
     - [X] DS referral validation
+    - [ ] DS NSEC(3) denial
   - [ ] NSEC/NSEC3 validation
-- [ ] Safe Question/Answer caching (**Basic impl. complete**)
+- [x] Question/Answer caching
