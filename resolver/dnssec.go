@@ -17,6 +17,7 @@ var (
 	errNoSignatures           = errors.New("No RRSIG records for zone that should be signed")
 	errMissingDNSKEY          = errors.New("No matching DNSKEY found for RRSIG records")
 	errInvalidSignaturePeriod = errors.New("Incorrect signature validity period")
+	errBadAnswer              = errors.New("Query response returned a none Success (0) RCODE")
 )
 
 func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *rootNS, parentDSSet []dns.RR) (*QueryLog, error) {
@@ -27,7 +28,11 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 	}
 
 	if len(r.Answer) == 0 {
+		log.AnswerType = "Failure"
 		return log, errNoDNSKEY
+	} else if r.Rcode != dns.RcodeSuccess {
+		log.AnswerType = dns.RcodeToString[r.Rcode]
+		return log, errBadAnswer
 	}
 
 	zskMap, kskMap := make(map[uint16]*dns.DNSKEY), make(map[uint16]*dns.DNSKEY)
@@ -43,6 +48,7 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 			}
 		}
 	}
+	log.AnswerType = "Success"
 
 	// To verify both the DNSKEY message and the passed in message
 	// we need both KSK and ZSK keys
@@ -74,7 +80,7 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 
 	// Only add response to cache if it wasn't a cache hit
 	if !log.CacheHit {
-		go rr.qac.add(&q, r.Answer, r.Ns, r.Extra, true, false)
+		go rr.cache.Add(&q, r.Answer, r.Ns, r.Extra, true, false)
 	}
 
 	return log, nil

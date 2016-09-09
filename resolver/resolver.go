@@ -1,17 +1,35 @@
 package resolver
 
 import (
-	"crypto/sha1"
+	"bytes"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	mrand "math/rand"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/miekg/dns"
 	"golang.org/x/net/context"
 )
+
+func init() {
+	b := [8]byte{}
+	_, err := rand.Read(b[:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read bytes for psrng initialization: %s\n", err)
+		return
+	}
+	i, err := binary.ReadVarint(bytes.NewBuffer(b[:]))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to read bytes for psrng initialization: %s\n", err)
+		return
+	}
+	mrand.Seed(i)
+}
 
 var (
 	maxReferrals = 10
@@ -85,17 +103,20 @@ type RecursiveResolver struct {
 
 	c *dns.Client
 
-	qac             *qaCache
+	cache           QuestionAnswerCache
 	rootNameservers []rootNS
 }
 
 // NewRecursiveResolver returns an initialized RecursiveResolver
-func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, rootKeys []dns.RR) *RecursiveResolver {
+func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, rootKeys []dns.RR, cache QuestionAnswerCache) *RecursiveResolver {
+	if cache == nil {
+		cache = newQACache()
+	}
 	rr := &RecursiveResolver{
 		useIPv6:   useIPv6,
 		useDNSSEC: useDNSSEC,
 		c:         new(dns.Client),
-		qac:       &qaCache{cache: make(map[[sha1.Size]byte]*cacheEntry)},
+		cache:     cache,
 	}
 	// Initialize root nameservers
 	addrs := extractRRSet(rootHints, dns.TypeA, "")
@@ -111,7 +132,7 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 		}
 	}
 	// Add root DNSSEC keys to cache indefinitely
-	rr.qac.add(&dns.Question{Name: ".", Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}, rootKeys, nil, nil, true, true)
+	rr.cache.Add(&dns.Question{Name: ".", Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}, rootKeys, nil, nil, true, true)
 	return rr
 }
 
@@ -122,11 +143,14 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *ro
 	m := new(dns.Msg)
 	m.SetEdns0(4096, rr.useDNSSEC)
 	m.Question = []dns.Question{q}
-	if answer, present := rr.qac.get(&q); present {
+	if answer, auth, extra, authenticated, present := rr.cache.Get(&q); present {
 		m.Rcode = dns.RcodeSuccess
 		m.Answer = answer
+		m.Ns = auth
+		m.Extra = extra
 		ql.CacheHit = true
 		ql.NS = nil
+		ql.DNSSECValid = authenticated
 		return m, ql, nil
 	}
 	r, _, err := rr.c.Exchange(m, net.JoinHostPort(auth.Addr, dnsPort))
@@ -145,7 +169,7 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *ro
 	return r, ql, nil
 }
 
-func (rr *RecursiveResolver) lookupHost(ctx context.Context, name string) (*rootNS, error) {
+func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*rootNS, error) {
 	// XXX: this should prob take into account the parent iterations...?
 	// XXX: this should do parallel v4/v6 lookups if a v6 stack is supported
 	// XXX: how to take into account below ingored validated meaning...?
@@ -177,7 +201,7 @@ func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, 
 		for ns, z = range nsToZone {
 			break
 		}
-		a, err := rr.lookupHost(ctx, ns)
+		a, err := rr.lookupNS(ctx, ns)
 		if err != nil {
 			return nil, err
 		}
@@ -229,6 +253,9 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 
 		// validate
 		validated := false
+		if log.CacheHit {
+			validated = log.DNSSECValid
+		}
 		if (i == 0 || len(parentDSSet) > 0) && !log.CacheHit {
 			dkLog, err := rr.checkDNSKEY(ctx, r, authority, parentDSSet)
 			log.Composites = append(log.Composites, dkLog)
@@ -250,7 +277,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 		if len(r.Answer) > 0 {
 			// cache
 			if !log.CacheHit {
-				go rr.qac.add(&q, r.Answer, r.Ns, r.Extra, validated, false)
+				go rr.cache.Add(&q, r.Answer, r.Ns, r.Extra, validated, false)
 			}
 
 			log.AnswerType = "Success"

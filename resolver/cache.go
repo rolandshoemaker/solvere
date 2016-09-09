@@ -56,10 +56,21 @@ func (ca *cacheEntry) update(entry *cacheEntry, answer, auth, extra []dns.RR, tt
 	entry.modified = time.Now()
 }
 
+// QuestionAnswerCache is used to cache responses to queries. The internal implementation
+// can be bypassed using this interface.
+type QuestionAnswerCache interface {
+	Get(q *dns.Question) ([]dns.RR, []dns.RR, []dns.RR, bool, bool)
+	Add(q *dns.Question, answer []dns.RR, auth []dns.RR, extra []dns.RR, authenticated, forever bool)
+}
+
 type qaCache struct {
 	mu sync.RWMutex
 	// XXX: May want a secondary index of sha256(q.Name, q.Class) for NSEC denial checks...
 	cache map[[sha1.Size]byte]*cacheEntry
+}
+
+func newQACache() *qaCache {
+	return &qaCache{cache: make(map[[sha1.Size]byte]*cacheEntry)}
 }
 
 func (qac *qaCache) del(entry *cacheEntry, id [sha1.Size]byte) {
@@ -93,7 +104,7 @@ func (qac *qaCache) prune(q *dns.Question, id [sha1.Size]byte, ttl int) {
 	}
 }
 
-func (qac *qaCache) add(q *dns.Question, answer, auth, extra []dns.RR, authenticated, forever bool) {
+func (qac *qaCache) Add(q *dns.Question, answer, auth, extra []dns.RR, authenticated, forever bool) {
 	id := hashQuestion(q)
 	var ttl int
 	if !forever {
@@ -120,16 +131,16 @@ func (qac *qaCache) getEntry(q *dns.Question) (*cacheEntry, bool) {
 	return entry, present
 }
 
-func (qac *qaCache) get(q *dns.Question) ([]dns.RR, bool) {
+func (qac *qaCache) Get(q *dns.Question) ([]dns.RR, []dns.RR, []dns.RR, bool, bool) {
 	if entry, present := qac.getEntry(q); present {
 		entry.mu.Lock()
 		defer entry.mu.Unlock()
 		if entry.removed {
-			return nil, false
+			return nil, nil, nil, false, false
 		}
-		return entry.answer, true
+		return entry.answer, entry.auth, entry.extra, entry.authenticated, true
 	}
-	return nil, false
+	return nil, nil, nil, false, false
 }
 
 func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]int, map[string]string) {
