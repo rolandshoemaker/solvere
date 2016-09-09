@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"crypto/sha1"
+	"encoding/json"
 	"errors"
 	"fmt"
 	mrand "math/rand"
@@ -14,14 +15,6 @@ import (
 )
 
 var (
-	// these should be parsed from a hints file!
-	rootNames = []dns.RR{
-		&dns.NS{Hdr: dns.RR_Header{Rrtype: dns.TypeNS}, Ns: "A.ROOT-SERVERS.NET"},
-	}
-	rootAddrs = []dns.RR{
-		&dns.A{Hdr: dns.RR_Header{Name: "A.ROOT-SERVERS.NET", Rrtype: dns.TypeA}, A: net.ParseIP("198.41.0.4")},
-	}
-
 	maxReferrals = 10
 
 	dnsPort = "53"
@@ -30,6 +23,28 @@ var (
 	errNoNSAuthorties     = errors.New("No NS authority records found")
 	errNoAuthorityAddress = errors.New("No A/AAAA records found for the chosen authority")
 )
+
+type queryLog struct {
+	Query       *dns.Question
+	AnswerType  string
+	CacheHit    bool `json:",omitempty"`
+	DNSSECValid bool
+	Latency     time.Duration
+	Error       error `json:",omitempty"`
+	Truncated   bool  `json:",omitempty"`
+
+	// Only present if CacheHit == false
+	NS *rootNS
+
+	Composites []queryLog `json:",omitempty"`
+}
+
+type lookupLog struct {
+	Query      *dns.Question
+	Started    time.Time
+	Latency    time.Duration
+	Composites []queryLog
+}
 
 type authMap map[string][]string
 
@@ -52,8 +67,9 @@ type Answer struct {
 }
 
 type rootNS struct {
-	name string
-	addr string
+	Name string
+	Addr string
+	Zone string
 }
 
 type RecursiveResolver struct {
@@ -64,7 +80,6 @@ type RecursiveResolver struct {
 
 	qac             *qaCache
 	rootNameservers []rootNS
-	// ac  *authCache
 }
 
 func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, rootKeys []dns.RR) *RecursiveResolver {
@@ -73,9 +88,8 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 		useDNSSEC: useDNSSEC,
 		c:         new(dns.Client),
 		qac:       &qaCache{cache: make(map[[sha1.Size]byte]*cacheEntry)},
-		// ac:        &authCache{cache: make(map[string]*authEntry)},
 	}
-	// setup nameservers
+	// Initialize root nameservers
 	addrs := extractRRSet(rootHints, dns.TypeA, "")
 	if useIPv6 {
 		addrs = append(addrs, extractRRSet(rootHints, dns.TypeAAAA, "")...)
@@ -83,24 +97,19 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 	for _, a := range addrs {
 		switch r := a.(type) {
 		case *dns.A:
-			rr.rootNameservers = append(rr.rootNameservers, rootNS{a.Header().Name, r.A.String()})
+			rr.rootNameservers = append(rr.rootNameservers, rootNS{a.Header().Name, r.A.String(), "."})
 		case *dns.AAAA:
-			rr.rootNameservers = append(rr.rootNameservers, rootNS{a.Header().Name, r.AAAA.String()})
+			rr.rootNameservers = append(rr.rootNameservers, rootNS{a.Header().Name, r.AAAA.String(), "."})
 		}
 	}
-	// add the root keys to cache indefinitely
+	// Add root DNSSEC keys to cache indefinitely
 	rr.qac.add(&dns.Question{Name: ".", Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}, rootKeys, nil, nil, true, true)
 	return rr
 }
 
-func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth, zone string) (*dns.Msg, queryLog, error) {
-	ql := queryLog{Query: &q, NSAddr: auth}
+func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *rootNS) (*dns.Msg, queryLog, error) {
+	ql := queryLog{Query: &q, NS: auth}
 	s := time.Now()
-	defer func() {
-		if ql.RTT != 0 {
-			ql.RTT = time.Since(s)
-		}
-	}()
 	m := new(dns.Msg)
 	m.SetEdns0(4096, rr.useDNSSEC)
 	m.Question = []dns.Question{q}
@@ -108,48 +117,51 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth, zo
 		m.Rcode = dns.RcodeSuccess
 		m.Answer = answer
 		ql.CacheHit = true
+		ql.Latency = time.Since(s)
 		return m, ql, nil
 	}
-	r, rtt, err := rr.c.Exchange(m, net.JoinHostPort(auth, dnsPort))
-	ql.RTT = rtt
+	r, _, err := rr.c.Exchange(m, net.JoinHostPort(auth.Addr, dnsPort))
 	if err != nil {
+		ql.Latency = time.Since(s)
 		return nil, ql, err
 	}
 
 	// check all returned records are in-bailiwick, ignore extra section?
 	for _, section := range [][]dns.RR{r.Answer, r.Ns} {
 		for _, record := range section {
-			if record.Header().Rrtype != dns.TypeOPT && !strings.HasSuffix(record.Header().Name, zone) {
+			if record.Header().Rrtype != dns.TypeOPT && !strings.HasSuffix(record.Header().Name, auth.Zone) {
+				ql.Latency = time.Since(s)
 				return nil, ql, errors.New("Out of bailiwick record in message") // or just strip invalid records...?
 			}
 		}
 	}
 
+	ql.Latency = time.Since(s)
 	return r, ql, nil
 }
 
-func (rr *RecursiveResolver) lookupHost(ctx context.Context, name string) (string, error) {
+func (rr *RecursiveResolver) lookupHost(ctx context.Context, name string) (*rootNS, error) {
 	// XXX: this should prob take into account the parent iterations...?
 	// XXX: this should do parallel v4/v6 lookups if a v6 stack is supported
 	// XXX: how to take into account below ingored validated meaning...?
 	r, _, err := rr.Lookup(ctx, dns.Question{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if r.Rcode != dns.RcodeSuccess {
-		return "", fmt.Errorf("Authority lookup failed for %s: %s", name, dns.RcodeToString[r.Rcode])
+		return nil, fmt.Errorf("Authority lookup failed for %s: %s", name, dns.RcodeToString[r.Rcode])
 	}
 	if len(r.Answer) == 0 {
-		return "", errNoAuthorityAddress
+		return nil, errNoAuthorityAddress
 	}
 	addresses := extractRRSet(r.Answer, dns.TypeA, name)
 	if len(addresses) == 0 {
-		return "", errNoAuthorityAddress
+		return nil, errNoAuthorityAddress
 	}
-	return addresses[mrand.Intn(len(addresses))].(*dns.A).A.String(), nil // ewwww
+	return &rootNS{Name: name, Addr: addresses[mrand.Intn(len(addresses))].(*dns.A).A.String()}, nil // ewwww
 }
 
-func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (string, string, error) {
+func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (*rootNS, error) {
 	zones, _, nsToZone := splitAuthsByZone(auths, extras, rr.useIPv6)
 	// go func() {
 	// 	for z, a := range zones {
@@ -160,25 +172,26 @@ func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, 
 	// }()
 	if len(zones) == 0 {
 		if len(nsToZone) == 0 {
-			return "", "", errNoNSAuthorties
+			return nil, errNoNSAuthorties
 		}
-		ns, z := "", ""
+		var ns, z string
 		for ns, z = range nsToZone {
 			break
 		}
 		a, err := rr.lookupHost(ctx, ns)
 		if err != nil {
-			return "", "", err
+			return nil, err
 		}
-		return a, z, nil
+		a.Zone = z
+		return a, nil
 	}
 	// abuse how ranging over maps works to select a 'random' element
-	for z, a := range zones {
-		if len(a) > 0 {
-			return a[mrand.Intn(len(a))], z, nil
+	for ns, z := range nsToZone {
+		if len(zones[z]) > 0 {
+			return &rootNS{ns, zones[z][mrand.Intn(len(zones[z]))], z}, nil
 		}
 	}
-	return "", "", errNoNSAuthorties
+	return nil, errNoNSAuthorties
 }
 
 func extractAnswer(m *dns.Msg) *Answer {
@@ -190,34 +203,39 @@ func extractAnswer(m *dns.Msg) *Answer {
 	}
 }
 
-func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answer, bool, error) {
-	zone := "."
-	authority := rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))].addr
-
+func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answer, lookupLog, error) {
 	ll := lookupLog{Query: &q, Started: time.Now()}
+
+	authority := &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
+
 	defer func() {
-		ll.sumLatency()
-		fmt.Println(ll.String())
+		ll.Latency = time.Since(ll.Started)
+		j, err := json.Marshal(ll)
+		if err != nil {
+			fmt.Println("err encoding log message")
+		}
+		fmt.Println(string(j))
 	}()
 
 	var parentDSSet []dns.RR
 	for i := 0; i < maxReferrals; i++ {
-		r, log, err := rr.query(ctx, q, authority, zone)
-		log.Error = err
-		defer func() { ll.CompositeQueries = append(ll.CompositeQueries, log) }()
+		r, log, err := rr.query(ctx, q, authority)
+		defer func() { ll.Composites = append(ll.Composites, log) }()
 		if err != nil && err != dns.ErrTruncated { // if truncated still try...
-			return nil, false, err
+			log.Error = err
+			return nil, ll, err
 		} else if err == dns.ErrTruncated {
-			// log it
+			log.Truncated = true
 		}
 
 		// validate
 		validated := false
-		if i == 0 || len(parentDSSet) > 0 {
-			err := rr.checkDNSKEY(ctx, r, zone, authority, parentDSSet)
+		if (i == 0 || len(parentDSSet) > 0) && !log.CacheHit {
+			dkLog, err := rr.checkDNSKEY(ctx, r, authority, parentDSSet)
+			log.Composites = append(log.Composites, dkLog)
 			if err != nil {
 				log.Error = err
-				return nil, false, err
+				return nil, ll, err
 			}
 			validated = true
 		}
@@ -225,35 +243,37 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 
 		if r.Rcode != dns.RcodeSuccess {
 			log.AnswerType = dns.RcodeToString[r.Rcode]
-			return extractAnswer(r), validated, nil
+			return extractAnswer(r), ll, nil
 		}
 
 		// good response
 		if len(r.Answer) > 0 {
 			// cache
-			go rr.qac.add(&q, r.Answer, r.Ns, r.Extra, validated, false)
+			if !log.CacheHit {
+				go rr.qac.add(&q, r.Answer, r.Ns, r.Extra, validated, false)
+			}
 
 			log.AnswerType = "Success"
 			// check for alias and chase or do that in RecursiveResolver.query?
-			return extractAnswer(r), validated, nil
+			return extractAnswer(r), ll, nil
 		}
 
 		// referral
 		if len(r.Ns) > 0 {
 			log.AnswerType = "Referral"
-			authority, zone, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
+			authority, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
 			if err != nil {
-				return nil, false, err
+				return nil, ll, err
 			}
 			if i == 0 || len(parentDSSet) > 0 {
-				parentDSSet = extractRRSet(r.Ns, dns.TypeDS, zone)
+				parentDSSet = extractRRSet(r.Ns, dns.TypeDS, authority.Zone)
 			}
 			// XXX: Need to verify referrals that include NSEC DS denial
 			continue
 		}
-		return nil, false, errors.New("No authority or additional records! IDK") // ???
+		return nil, ll, errors.New("No authority or additional records! IDK") // ???
 	}
-	return nil, false, errTooManyReferrals
+	return nil, ll, errTooManyReferrals
 }
 
 func extractRRSet(in []dns.RR, t uint16, name string) []dns.RR {

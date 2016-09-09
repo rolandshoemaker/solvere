@@ -19,16 +19,19 @@ var (
 	errInvalidSignaturePeriod = errors.New("Incorrect signature validity period")
 )
 
-func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, zone, auth string, parentDSSet []dns.RR) error {
-	zskMap, kskMap := make(map[uint16]*dns.DNSKEY), make(map[uint16]*dns.DNSKEY)
-	q := dns.Question{Name: zone, Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}
-	r, _, err := rr.query(ctx, q, auth, zone)
+func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *rootNS, parentDSSet []dns.RR) (queryLog, error) {
+	q := dns.Question{Name: auth.Zone, Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}
+	r, log, err := rr.query(ctx, q, auth)
 	if err != nil {
-		return err
+		return log, err
 	}
+
 	if len(r.Answer) == 0 {
-		return errNoDNSKEY
+		return log, errNoDNSKEY
 	}
+
+	zskMap, kskMap := make(map[uint16]*dns.DNSKEY), make(map[uint16]*dns.DNSKEY)
+	// Extract DNSKEYs based on type
 	for _, a := range r.Answer {
 		if a.Header().Rrtype == dns.TypeDNSKEY {
 			dnskey := a.(*dns.DNSKEY)
@@ -40,28 +43,41 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, zone, 
 			}
 		}
 	}
+
+	// To verify both the DNSKEY message and the passed in message
+	// we need both KSK and ZSK keys
 	if len(kskMap) == 0 || len(zskMap) == 0 {
-		return errNoDNSKEY
+		return log, errNoDNSKEY
 	}
 
+	// Verify DNSKEY RRSIG using the ZSK keys
 	err = rr.verifyRRSIG(m, zskMap)
 	if err != nil {
-		return err
+		return log, err
 	}
 
+	// The only time this should be false is if the zone == .
 	if len(parentDSSet) > 0 {
+		// Verify RRSIGs from the message passed in using the KSK keys
 		err = rr.verifyRRSIG(r, kskMap)
 		if err != nil {
-			return err
+			return log, err
 		}
+		// Make sure the parent DS record matches one of the KSK DNSKEYS
 		err = rr.checkDS(kskMap, parentDSSet)
 		if err != nil {
-			return err
+			return log, err
 		}
 	}
-	go rr.qac.add(&q, r.Answer, r.Ns, r.Extra, true, false)
 
-	return nil
+	log.DNSSECValid = true
+
+	// Only add response to cache if it wasn't a cache hit
+	if !log.CacheHit {
+		go rr.qac.add(&q, r.Answer, r.Ns, r.Extra, true, false)
+	}
+
+	return log, nil
 }
 
 func (rr *RecursiveResolver) checkDS(kskMap map[uint16]*dns.DNSKEY, parentDSSet []dns.RR) error {
