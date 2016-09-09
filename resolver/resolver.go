@@ -2,7 +2,6 @@ package resolver
 
 import (
 	"crypto/sha1"
-	"encoding/json"
 	"errors"
 	"fmt"
 	mrand "math/rand"
@@ -24,7 +23,8 @@ var (
 	errNoAuthorityAddress = errors.New("No A/AAAA records found for the chosen authority")
 )
 
-type queryLog struct {
+// QueryLog describes a query to a upstream nameserver
+type QueryLog struct {
 	Query       *dns.Question
 	AnswerType  string
 	CacheHit    bool `json:",omitempty"`
@@ -34,16 +34,19 @@ type queryLog struct {
 	Truncated   bool  `json:",omitempty"`
 
 	// Only present if CacheHit == false
-	NS *rootNS
+	NS *rootNS `json:",omitempty"`
 
-	Composites []queryLog `json:",omitempty"`
+	Composites []*QueryLog `json:",omitempty"`
 }
 
-type lookupLog struct {
-	Query      *dns.Question
-	Started    time.Time
-	Latency    time.Duration
-	Composites []queryLog
+// LookupLog describes a iterative resolution
+type LookupLog struct {
+	Query       *dns.Question
+	DNSSECValid bool
+	Started     time.Time
+	Latency     time.Duration
+
+	Composites []*QueryLog
 }
 
 type authMap map[string][]string
@@ -59,11 +62,14 @@ func buildAuthMap(auths []dns.RR, extras []dns.RR) *authMap {
 	return &am
 }
 
+// Answer contains the answer to a iterative resolution performed
+// by RecursiveResolver.Lookup
 type Answer struct {
-	Answer     []dns.RR
-	Authority  []dns.RR
-	Additional []dns.RR
-	Rcode      int
+	Answer        []dns.RR
+	Authority     []dns.RR
+	Additional    []dns.RR
+	Rcode         int
+	Authenticated bool
 }
 
 type rootNS struct {
@@ -72,6 +78,7 @@ type rootNS struct {
 	Zone string
 }
 
+// RecursiveResolver defines the parameters for running a recursive resolver
 type RecursiveResolver struct {
 	useIPv6   bool
 	useDNSSEC bool
@@ -82,6 +89,7 @@ type RecursiveResolver struct {
 	rootNameservers []rootNS
 }
 
+// NewRecursiveResolver returns an initialized RecursiveResolver
 func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, rootKeys []dns.RR) *RecursiveResolver {
 	rr := &RecursiveResolver{
 		useIPv6:   useIPv6,
@@ -107,9 +115,10 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 	return rr
 }
 
-func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *rootNS) (*dns.Msg, queryLog, error) {
-	ql := queryLog{Query: &q, NS: auth}
+func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *rootNS) (*dns.Msg, *QueryLog, error) {
+	ql := &QueryLog{Query: &q, NS: auth}
 	s := time.Now()
+	defer func() { ql.Latency = time.Since(s) }()
 	m := new(dns.Msg)
 	m.SetEdns0(4096, rr.useDNSSEC)
 	m.Question = []dns.Question{q}
@@ -117,12 +126,11 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *ro
 		m.Rcode = dns.RcodeSuccess
 		m.Answer = answer
 		ql.CacheHit = true
-		ql.Latency = time.Since(s)
+		ql.NS = nil
 		return m, ql, nil
 	}
 	r, _, err := rr.c.Exchange(m, net.JoinHostPort(auth.Addr, dnsPort))
 	if err != nil {
-		ql.Latency = time.Since(s)
 		return nil, ql, err
 	}
 
@@ -130,13 +138,10 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *ro
 	for _, section := range [][]dns.RR{r.Answer, r.Ns} {
 		for _, record := range section {
 			if record.Header().Rrtype != dns.TypeOPT && !strings.HasSuffix(record.Header().Name, auth.Zone) {
-				ql.Latency = time.Since(s)
 				return nil, ql, errors.New("Out of bailiwick record in message") // or just strip invalid records...?
 			}
 		}
 	}
-
-	ql.Latency = time.Since(s)
 	return r, ql, nil
 }
 
@@ -163,18 +168,12 @@ func (rr *RecursiveResolver) lookupHost(ctx context.Context, name string) (*root
 
 func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (*rootNS, error) {
 	zones, _, nsToZone := splitAuthsByZone(auths, extras, rr.useIPv6)
-	// go func() {
-	// 	for z, a := range zones {
-	// 		if len(a) > 0 {
-	// 			rr.ac.add(z, a, minTTLs[z])
-	// 		}
-	// 	}
-	// }()
 	if len(zones) == 0 {
 		if len(nsToZone) == 0 {
 			return nil, errNoNSAuthorties
 		}
 		var ns, z string
+		// abuse how ranging over maps works to select a 'random' element
 		for ns, z = range nsToZone {
 			break
 		}
@@ -194,33 +193,33 @@ func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, 
 	return nil, errNoNSAuthorties
 }
 
-func extractAnswer(m *dns.Msg) *Answer {
+func extractAnswer(m *dns.Msg, authenticated bool) *Answer {
 	return &Answer{
-		Answer:     m.Answer,
-		Authority:  m.Ns,
-		Additional: m.Extra,
-		Rcode:      m.Rcode,
+		Answer:        m.Answer,
+		Authority:     m.Ns,
+		Additional:    m.Extra,
+		Rcode:         m.Rcode,
+		Authenticated: authenticated,
 	}
 }
 
-func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answer, lookupLog, error) {
-	ll := lookupLog{Query: &q, Started: time.Now()}
+// Lookup a miekg/dns.Question iteratively. All upstream responses are validated
+// and a DNSSEC chain is built if the RecursiveResolver was initialized to do so.
+// If responses are found in the underlying cache they will be used instead of
+// sending messages to remote nameservers.
+func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answer, *LookupLog, error) {
+	ll := &LookupLog{Query: &q, Started: time.Now()}
 
 	authority := &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
 
 	defer func() {
 		ll.Latency = time.Since(ll.Started)
-		j, err := json.Marshal(ll)
-		if err != nil {
-			fmt.Println("err encoding log message")
-		}
-		fmt.Println(string(j))
 	}()
 
 	var parentDSSet []dns.RR
 	for i := 0; i < maxReferrals; i++ {
 		r, log, err := rr.query(ctx, q, authority)
-		defer func() { ll.Composites = append(ll.Composites, log) }()
+		ll.Composites = append(ll.Composites, log)
 		if err != nil && err != dns.ErrTruncated { // if truncated still try...
 			log.Error = err
 			return nil, ll, err
@@ -240,10 +239,11 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 			validated = true
 		}
 		log.DNSSECValid = validated
+		ll.DNSSECValid = validated
 
 		if r.Rcode != dns.RcodeSuccess {
 			log.AnswerType = dns.RcodeToString[r.Rcode]
-			return extractAnswer(r), ll, nil
+			return extractAnswer(r, validated), ll, nil
 		}
 
 		// good response
@@ -255,7 +255,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 
 			log.AnswerType = "Success"
 			// check for alias and chase or do that in RecursiveResolver.query?
-			return extractAnswer(r), ll, nil
+			return extractAnswer(r, validated), ll, nil
 		}
 
 		// referral

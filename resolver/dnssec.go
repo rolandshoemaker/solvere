@@ -19,7 +19,7 @@ var (
 	errInvalidSignaturePeriod = errors.New("Incorrect signature validity period")
 )
 
-func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *rootNS, parentDSSet []dns.RR) (queryLog, error) {
+func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *rootNS, parentDSSet []dns.RR) (*QueryLog, error) {
 	q := dns.Question{Name: auth.Zone, Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}
 	r, log, err := rr.query(ctx, q, auth)
 	if err != nil {

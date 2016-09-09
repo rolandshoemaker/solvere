@@ -2,9 +2,6 @@ package resolver
 
 import (
 	"crypto/sha1"
-	// "fmt"
-	// mrand "math/rand"
-	// "strings"
 	"sync"
 	"time"
 
