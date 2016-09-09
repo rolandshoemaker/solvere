@@ -8,8 +8,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-func hashQuestion(q *dns.Question) [sha1.Size]byte {
-	inp := append([]byte{uint8(q.Qtype & 0xff), uint8(q.Qtype >> 8), uint8(q.Qclass & 0xff), uint8(q.Qclass >> 8)}, []byte(q.Name)...)
+func hashQuestion(q *Question) [sha1.Size]byte {
+	inp := append([]byte{uint8(q.Type & 0xff), uint8(q.Type >> 8)}, []byte(q.Name)...)
 	return sha1.Sum(inp)
 }
 
@@ -59,32 +59,34 @@ func (ca *cacheEntry) update(entry *cacheEntry, answer, auth, extra []dns.RR, tt
 // QuestionAnswerCache is used to cache responses to queries. The internal implementation
 // can be bypassed using this interface.
 type QuestionAnswerCache interface {
-	Get(q *dns.Question) ([]dns.RR, []dns.RR, []dns.RR, bool, bool)
-	Add(q *dns.Question, answer []dns.RR, auth []dns.RR, extra []dns.RR, authenticated, forever bool)
+	Get(q *Question) ([]dns.RR, []dns.RR, []dns.RR, bool, bool)
+	Add(q *Question, answer []dns.RR, auth []dns.RR, extra []dns.RR, authenticated, forever bool)
 }
 
-type qaCache struct {
+// BasicCache is a basic implementation of the QuestionAnswerCache interface
+type BasicCache struct {
 	mu sync.RWMutex
 	// XXX: May want a secondary index of sha256(q.Name, q.Class) for NSEC denial checks...
 	cache map[[sha1.Size]byte]*cacheEntry
 }
 
-func newQACache() *qaCache {
-	return &qaCache{cache: make(map[[sha1.Size]byte]*cacheEntry)}
+// NewBasicCache returns an initialized BasicCache
+func NewBasicCache() *BasicCache {
+	return &BasicCache{cache: make(map[[sha1.Size]byte]*cacheEntry)}
 }
 
-func (qac *qaCache) del(entry *cacheEntry, id [sha1.Size]byte) {
-	qac.mu.Lock()
-	defer qac.mu.Unlock()
-	delete(qac.cache, id)
+func (bc *BasicCache) del(entry *cacheEntry, id [sha1.Size]byte) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	delete(bc.cache, id)
 	entry.removed = true
 }
 
-func (qac *qaCache) prune(q *dns.Question, id [sha1.Size]byte, ttl int) {
+func (bc *BasicCache) prune(q *Question, id [sha1.Size]byte, ttl int) {
 	sleep := time.Second * time.Duration(ttl)
 	for {
 		time.Sleep(sleep)
-		entry, present := qac.getEntry(q)
+		entry, present := bc.getEntry(q)
 		if !present {
 			return
 		}
@@ -95,7 +97,7 @@ func (qac *qaCache) prune(q *dns.Question, id [sha1.Size]byte, ttl int) {
 		}
 		new := entry.modified.Add(time.Second * time.Duration(entry.ttl)).Sub(time.Now())
 		if new < 0 {
-			qac.del(entry, id)
+			bc.del(entry, id)
 			entry.mu.Unlock()
 			return
 		}
@@ -104,35 +106,37 @@ func (qac *qaCache) prune(q *dns.Question, id [sha1.Size]byte, ttl int) {
 	}
 }
 
-func (qac *qaCache) Add(q *dns.Question, answer, auth, extra []dns.RR, authenticated, forever bool) {
+// Add adds a response to the cache using a index based on the question
+func (bc *BasicCache) Add(q *Question, answer, auth, extra []dns.RR, authenticated, forever bool) {
 	id := hashQuestion(q)
 	var ttl int
 	if !forever {
 		ttl = minTTL(append(answer, append(auth, extra...)...))
 	}
 	// should filter out OPT records here
-	qac.mu.Lock()
-	defer qac.mu.Unlock()
-	if entry, present := qac.cache[id]; present {
-		qac.cache[id].update(entry, answer, auth, extra, ttl, authenticated)
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	if entry, present := bc.cache[id]; present {
+		bc.cache[id].update(entry, answer, auth, extra, ttl, authenticated)
 		return
 	}
-	qac.cache[id] = &cacheEntry{answer, auth, extra, authenticated, ttl, time.Now(), false, sync.Mutex{}}
+	bc.cache[id] = &cacheEntry{answer, auth, extra, authenticated, ttl, time.Now(), false, sync.Mutex{}}
 	if ttl > 0 {
-		go qac.prune(q, id, ttl)
+		go bc.prune(q, id, ttl)
 	}
 }
 
-func (qac *qaCache) getEntry(q *dns.Question) (*cacheEntry, bool) {
+func (bc *BasicCache) getEntry(q *Question) (*cacheEntry, bool) {
 	id := hashQuestion(q)
-	qac.mu.RLock()
-	defer qac.mu.RUnlock()
-	entry, present := qac.cache[id]
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	entry, present := bc.cache[id]
 	return entry, present
 }
 
-func (qac *qaCache) Get(q *dns.Question) ([]dns.RR, []dns.RR, []dns.RR, bool, bool) {
-	if entry, present := qac.getEntry(q); present {
+// Get returns the response for a question if it exists in the cache
+func (bc *BasicCache) Get(q *Question) ([]dns.RR, []dns.RR, []dns.RR, bool, bool) {
+	if entry, present := bc.getEntry(q); present {
 		entry.mu.Lock()
 		defer entry.mu.Unlock()
 		if entry.removed {

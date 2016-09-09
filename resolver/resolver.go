@@ -1,3 +1,6 @@
+// Package resolver provides an implementation of a recursive, validating,
+// DNSSEC aware DNS resolver. It also provides a basic question and answer
+// cache implementation.
 package resolver
 
 import (
@@ -17,39 +20,49 @@ import (
 )
 
 func init() {
+	// Initialize math/rand with 8 bytes from crypto/rand so the randomness
+	// isn't _super_ terrible
 	b := [8]byte{}
 	_, err := rand.Read(b[:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read bytes for psrng initialization: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to read bytes for PSRNG initialization: %s\n", err)
 		return
 	}
 	i, err := binary.ReadVarint(bytes.NewBuffer(b[:]))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read bytes for psrng initialization: %s\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to read bytes for PSRNG initialization: %s\n", err)
 		return
 	}
 	mrand.Seed(i)
 }
 
 var (
-	maxReferrals = 10
+	// MaxReferrals is the maximum number of referral responses before failing
+	MaxReferrals = 10
 
 	dnsPort = "53"
 
-	errTooManyReferrals   = errors.New("Too many referrals")
-	errNoNSAuthorties     = errors.New("No NS authority records found")
-	errNoAuthorityAddress = errors.New("No A/AAAA records found for the chosen authority")
+	ErrTooManyReferrals   = errors.New("solvere/resolver: Too many referrals")
+	ErrNoNSAuthorties     = errors.New("solvere/resolver: No NS authority records found")
+	ErrNoAuthorityAddress = errors.New("solvere/resolver: No A/AAAA records found for the chosen authority")
 )
+
+// Question represents a DNS IN question
+type Question struct {
+	Name string
+	Type uint16
+}
 
 // QueryLog describes a query to a upstream nameserver
 type QueryLog struct {
-	Query       *dns.Question
-	AnswerType  string
+	Query       *Question
+	Rcode       int
 	CacheHit    bool `json:",omitempty"`
 	DNSSECValid bool
 	Latency     time.Duration
-	Error       error `json:",omitempty"`
-	Truncated   bool  `json:",omitempty"`
+	Error       string `json:",omitempty"`
+	Truncated   bool   `json:",omitempty"`
+	Referral    bool   `json:",omitempty"`
 
 	// Only present if CacheHit == false
 	NS *rootNS `json:",omitempty"`
@@ -59,10 +72,11 @@ type QueryLog struct {
 
 // LookupLog describes a iterative resolution
 type LookupLog struct {
-	Query       *dns.Question
+	Query       *Question
 	DNSSECValid bool
 	Started     time.Time
 	Latency     time.Duration
+	Rcode       uint16
 
 	Composites []*QueryLog
 }
@@ -107,11 +121,9 @@ type RecursiveResolver struct {
 	rootNameservers []rootNS
 }
 
-// NewRecursiveResolver returns an initialized RecursiveResolver
+// NewRecursiveResolver returns an initialized RecursiveResolver. If cache is nil
+// answers won't be cached.
 func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, rootKeys []dns.RR, cache QuestionAnswerCache) *RecursiveResolver {
-	if cache == nil {
-		cache = newQACache()
-	}
 	rr := &RecursiveResolver{
 		useIPv6:   useIPv6,
 		useDNSSEC: useDNSSEC,
@@ -132,31 +144,37 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 		}
 	}
 	// Add root DNSSEC keys to cache indefinitely
-	rr.cache.Add(&dns.Question{Name: ".", Qtype: dns.TypeDNSKEY, Qclass: dns.ClassINET}, rootKeys, nil, nil, true, true)
+	if rr.cache != nil {
+		rr.cache.Add(&Question{Name: ".", Type: dns.TypeDNSKEY}, rootKeys, nil, nil, true, true)
+	}
 	return rr
 }
 
-func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *rootNS) (*dns.Msg, *QueryLog, error) {
-	ql := &QueryLog{Query: &q, NS: auth}
+func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *rootNS) (*dns.Msg, *QueryLog, error) {
+	ql := &QueryLog{Query: q, NS: auth}
 	s := time.Now()
 	defer func() { ql.Latency = time.Since(s) }()
 	m := new(dns.Msg)
 	m.SetEdns0(4096, rr.useDNSSEC)
-	m.Question = []dns.Question{q}
-	if answer, auth, extra, authenticated, present := rr.cache.Get(&q); present {
-		m.Rcode = dns.RcodeSuccess
-		m.Answer = answer
-		m.Ns = auth
-		m.Extra = extra
-		ql.CacheHit = true
-		ql.NS = nil
-		ql.DNSSECValid = authenticated
-		return m, ql, nil
+	m.Question = []dns.Question{{Name: q.Name, Qtype: q.Type, Qclass: dns.ClassINET}}
+	if rr.cache != nil {
+		if answer, auth, extra, authenticated, present := rr.cache.Get(q); present {
+			m.Rcode = dns.RcodeSuccess
+			m.Answer = answer
+			m.Ns = auth
+			m.Extra = extra
+			ql.CacheHit = true
+			ql.NS = nil
+			ql.DNSSECValid = authenticated
+			ql.Rcode = dns.RcodeSuccess
+			return m, ql, nil
+		}
 	}
 	r, _, err := rr.c.Exchange(m, net.JoinHostPort(auth.Addr, dnsPort))
 	if err != nil {
 		return nil, ql, err
 	}
+	ql.Rcode = r.Rcode
 
 	// check all returned records are in-bailiwick, ignore extra section?
 	for _, section := range [][]dns.RR{r.Answer, r.Ns} {
@@ -170,10 +188,11 @@ func (rr *RecursiveResolver) query(ctx context.Context, q dns.Question, auth *ro
 }
 
 func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*rootNS, error) {
-	// XXX: this should prob take into account the parent iterations...?
-	// XXX: this should do parallel v4/v6 lookups if a v6 stack is supported
-	// XXX: how to take into account below ingored validated meaning...?
-	r, _, err := rr.Lookup(ctx, dns.Question{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET})
+	// BUG(roland): LookupLog for lookupNS calls isn't included in parent chain
+	// BUG(roland): There is no maximum depth to Lookup -> lookupNS -> Lookup calls, looping is possible
+	// BUG(roland): I'm not sure how the lookup of a NS addr should be taken into account in terms of the
+	//              dnssec chain
+	r, _, err := rr.Lookup(ctx, Question{Name: name, Type: dns.TypeA})
 	if err != nil {
 		return nil, err
 	}
@@ -181,11 +200,11 @@ func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*rootNS
 		return nil, fmt.Errorf("Authority lookup failed for %s: %s", name, dns.RcodeToString[r.Rcode])
 	}
 	if len(r.Answer) == 0 {
-		return nil, errNoAuthorityAddress
+		return nil, ErrNoAuthorityAddress
 	}
 	addresses := extractRRSet(r.Answer, dns.TypeA, name)
 	if len(addresses) == 0 {
-		return nil, errNoAuthorityAddress
+		return nil, ErrNoAuthorityAddress
 	}
 	return &rootNS{Name: name, Addr: addresses[mrand.Intn(len(addresses))].(*dns.A).A.String()}, nil // ewwww
 }
@@ -194,7 +213,7 @@ func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, 
 	zones, _, nsToZone := splitAuthsByZone(auths, extras, rr.useIPv6)
 	if len(zones) == 0 {
 		if len(nsToZone) == 0 {
-			return nil, errNoNSAuthorties
+			return nil, ErrNoNSAuthorties
 		}
 		var ns, z string
 		// abuse how ranging over maps works to select a 'random' element
@@ -214,7 +233,7 @@ func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, 
 			return &rootNS{ns, zones[z][mrand.Intn(len(zones[z]))], z}, nil
 		}
 	}
-	return nil, errNoNSAuthorties
+	return nil, ErrNoNSAuthorties
 }
 
 func extractAnswer(m *dns.Msg, authenticated bool) *Answer {
@@ -227,11 +246,11 @@ func extractAnswer(m *dns.Msg, authenticated bool) *Answer {
 	}
 }
 
-// Lookup a miekg/dns.Question iteratively. All upstream responses are validated
+// Lookup a Question iteratively. All upstream responses are validated
 // and a DNSSEC chain is built if the RecursiveResolver was initialized to do so.
 // If responses are found in the underlying cache they will be used instead of
 // sending messages to remote nameservers.
-func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answer, *LookupLog, error) {
+func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *LookupLog, error) {
 	ll := &LookupLog{Query: &q, Started: time.Now()}
 
 	authority := &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
@@ -241,11 +260,11 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 	}()
 
 	var parentDSSet []dns.RR
-	for i := 0; i < maxReferrals; i++ {
-		r, log, err := rr.query(ctx, q, authority)
+	for i := 0; i < MaxReferrals; i++ {
+		r, log, err := rr.query(ctx, &q, authority)
 		ll.Composites = append(ll.Composites, log)
 		if err != nil && err != dns.ErrTruncated { // if truncated still try...
-			log.Error = err
+			log.Error = err.Error()
 			return nil, ll, err
 		} else if err == dns.ErrTruncated {
 			log.Truncated = true
@@ -260,7 +279,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 			dkLog, err := rr.checkDNSKEY(ctx, r, authority, parentDSSet)
 			log.Composites = append(log.Composites, dkLog)
 			if err != nil {
-				log.Error = err
+				log.Error = err.Error()
 				return nil, ll, err
 			}
 			validated = true
@@ -269,7 +288,6 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 		ll.DNSSECValid = validated
 
 		if r.Rcode != dns.RcodeSuccess {
-			log.AnswerType = dns.RcodeToString[r.Rcode]
 			return extractAnswer(r, validated), ll, nil
 		}
 
@@ -277,17 +295,19 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 		if len(r.Answer) > 0 {
 			// cache
 			if !log.CacheHit {
-				go rr.cache.Add(&q, r.Answer, r.Ns, r.Extra, validated, false)
+				if rr.cache != nil {
+					go rr.cache.Add(&q, r.Answer, r.Ns, r.Extra, validated, false)
+				}
 			}
 
-			log.AnswerType = "Success"
 			// check for alias and chase or do that in RecursiveResolver.query?
 			return extractAnswer(r, validated), ll, nil
 		}
 
 		// referral
 		if len(r.Ns) > 0 {
-			log.AnswerType = "Referral"
+			log.Referral = true
+			// BUG(roland): NSEC DS delegation denials aren't checked
 			authority, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
 			if err != nil {
 				return nil, ll, err
@@ -300,7 +320,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q dns.Question) (*Answe
 		}
 		return nil, ll, errors.New("No authority or additional records! IDK") // ???
 	}
-	return nil, ll, errTooManyReferrals
+	return nil, ll, ErrTooManyReferrals
 }
 
 func extractRRSet(in []dns.RR, t uint16, name string) []dns.RR {
