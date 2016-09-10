@@ -6,12 +6,12 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/rolandshoemaker/solvere"
 	"github.com/rolandshoemaker/solvere/hints"
-	"github.com/rolandshoemaker/solvere/resolver"
 )
 
 func main() {
-	s := &server{resolver.NewRecursiveResolver(false, true, hints.RootNameservers, hints.RootKeys, resolver.NewBasicCache())}
+	s := &server{solvere.NewRecursiveResolver(false, true, hints.RootNameservers, hints.RootKeys, solvere.NewBasicCache())}
 	dns.HandleFunc(".", s.handler)
 	dnsServer := &dns.Server{
 		Addr:         "0.0.0.0:53",

@@ -1,7 +1,7 @@
-// Package resolver provides an implementation of a recursive, validating,
+// Package solvere provides an implementation of a recursive, validating,
 // DNSSEC aware DNS resolver. It also provides a basic question and answer
 // cache implementation.
-package resolver
+package solvere
 
 import (
 	"bytes"
@@ -42,9 +42,9 @@ var (
 
 	dnsPort = "53"
 
-	ErrTooManyReferrals   = errors.New("solvere/resolver: Too many referrals")
-	ErrNoNSAuthorties     = errors.New("solvere/resolver: No NS authority records found")
-	ErrNoAuthorityAddress = errors.New("solvere/resolver: No A/AAAA records found for the chosen authority")
+	ErrTooManyReferrals   = errors.New("solvere: Too many referrals")
+	ErrNoNSAuthorties     = errors.New("solvere: No NS authority records found")
+	ErrNoAuthorityAddress = errors.New("solvere: No A/AAAA records found for the chosen authority")
 )
 
 // Question represents a DNS IN question

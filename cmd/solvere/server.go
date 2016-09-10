@@ -7,11 +7,11 @@ import (
 	"github.com/miekg/dns"
 	"golang.org/x/net/context"
 
-	"github.com/rolandshoemaker/solvere/resolver"
+	"github.com/rolandshoemaker/solvere"
 )
 
 type server struct {
-	rr *resolver.RecursiveResolver
+	rr *solvere.RecursiveResolver
 }
 
 func (s *server) handler(w dns.ResponseWriter, r *dns.Msg) {
@@ -26,7 +26,7 @@ func (s *server) handler(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	q := resolver.Question{r.Question[0].Name, r.Question[0].Qtype}
+	q := solvere.Question{r.Question[0].Name, r.Question[0].Qtype}
 	ctx := context.TODO()
 
 	a, log, err := s.rr.Lookup(ctx, q)

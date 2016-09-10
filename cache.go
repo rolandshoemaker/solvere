@@ -1,4 +1,4 @@
-package resolver
+package solvere
 
 import (
 	"crypto/sha1"

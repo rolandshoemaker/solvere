@@ -1,4 +1,4 @@
-package resolver
+package solvere
 
 import (
 	"errors"
@@ -10,14 +10,14 @@ import (
 )
 
 var (
-	ErrNoDNSKEY               = errors.New("solvere/resolver: No DNSKEY records found")
-	ErrMissingKSK             = errors.New("solvere/resolver: No KSK DNSKEY found for DS records")
-	ErrFailedToConvertKSK     = errors.New("solvere/resolver: Failed to convert KSK DNSKEY record to DS record")
-	ErrMismatchingDS          = errors.New("solvere/resolver: KSK DNSKEY record does not match DS record from parent zone")
-	ErrNoSignatures           = errors.New("solvere/resolver: No RRSIG records for zone that should be signed")
-	ErrMissingDNSKEY          = errors.New("solvere/resolver: No matching DNSKEY found for RRSIG records")
-	ErrInvalidSignaturePeriod = errors.New("solvere/resolver: Incorrect signature validity period")
-	ErrBadAnswer              = errors.New("solvere/resolver: Query response returned a none Success (0) RCODE")
+	ErrNoDNSKEY               = errors.New("solvere: No DNSKEY records found")
+	ErrMissingKSK             = errors.New("solvere: No KSK DNSKEY found for DS records")
+	ErrFailedToConvertKSK     = errors.New("solvere: Failed to convert KSK DNSKEY record to DS record")
+	ErrMismatchingDS          = errors.New("solvere: KSK DNSKEY record does not match DS record from parent zone")
+	ErrNoSignatures           = errors.New("solvere: No RRSIG records for zone that should be signed")
+	ErrMissingDNSKEY          = errors.New("solvere: No matching DNSKEY found for RRSIG records")
+	ErrInvalidSignaturePeriod = errors.New("solvere: Incorrect signature validity period")
+	ErrBadAnswer              = errors.New("solvere: Query response returned a none Success (0) RCODE")
 )
 
 func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *Nameserver, parentDSSet []dns.RR) (*QueryLog, error) {
