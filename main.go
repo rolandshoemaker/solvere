@@ -2,19 +2,17 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"net/http"
-	_ "net/http/pprof"
 	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/rolandshoemaker/solvere/hints"
+	"github.com/rolandshoemaker/solvere/resolver"
 )
 
 func main() {
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-	dns.HandleFunc(".", handler)
+	s := &server{resolver.NewRecursiveResolver(false, true, hints.RootNameservers, hints.RootKeys, resolver.NewBasicCache())}
+	dns.HandleFunc(".", s.handler)
 	dnsServer := &dns.Server{
 		Addr:         "0.0.0.0:53",
 		Net:          "udp",

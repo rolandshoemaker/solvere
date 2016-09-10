@@ -1,23 +1,20 @@
 package main
 
 import (
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
-	mrand "math/rand"
 
 	"github.com/miekg/dns"
 	"golang.org/x/net/context"
-	"golang.org/x/net/trace"
+
+	"github.com/rolandshoemaker/solvere/resolver"
 )
 
-func genID() string {
-	i32 := mrand.Uint32()
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, i32)
-	return fmt.Sprintf("%x", b)
+type server struct {
+	rr *resolver.RecursiveResolver
 }
 
-func handler(w dns.ResponseWriter, r *dns.Msg) {
+func (s *server) handler(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.RecursionAvailable = true
@@ -29,28 +26,33 @@ func handler(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	tr := trace.New("resolver-request", r.Question[0].String())
-	defer tr.Finish()
-	ctx := trace.NewContext(context.WithValue(context.Background(), "request-id", genID()), tr)
+	q := resolver.Question{r.Question[0].Name, r.Question[0].Qtype}
+	ctx := context.TODO()
 
-	a, err := recursiveResolve(ctx, r.Question[0], "", 0)
-	if err != nil {
-		fmt.Printf(
-			"Request %s: error resolving '%s %s %s': %s\n", ctx.Value("request-id"),
-			r.Question[0].Name,
-			dns.ClassToString[r.Question[0].Qclass],
-			dns.TypeToString[r.Question[0].Qtype],
-			err,
-		)
-		m.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(m)
-		tr.SetError()
+	a, log, err := s.rr.Lookup(ctx, q)
+	j, jerr := json.Marshal(log)
+	if jerr != nil {
+		fmt.Println("err encoding log message")
 		return
 	}
-	m.Rcode = a.rcode
-	m.Answer = a.answer
-	m.Ns = a.authority
-	m.Extra = a.additional
+	fmt.Println(string(j))
+
+	if err != nil {
+		// fmt.Printf(
+		// 	"Request failed: error resolving '%s IN %s': %s\n",
+		// 	q.Name,
+		// 	dns.TypeToString[q.Type],
+		// 	err,
+		// )
+		m.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return
+	}
+	m.Rcode = a.Rcode
+	m.AuthenticatedData = a.Authenticated
+	m.Answer = a.Answer
+	m.Ns = a.Authority
+	m.Extra = a.Additional
 	w.WriteMsg(m)
 	return
 }

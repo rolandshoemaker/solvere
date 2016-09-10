@@ -31,17 +31,14 @@ func minTTL(a []dns.RR) int {
 }
 
 type cacheEntry struct {
-	answer        []dns.RR
-	auth          []dns.RR
-	extra         []dns.RR
-	authenticated bool
-	ttl           int
-	modified      time.Time
-	removed       bool
-	mu            sync.Mutex
+	answer   *Answer
+	ttl      int
+	modified time.Time
+	removed  bool
+	mu       sync.Mutex
 }
 
-func (ca *cacheEntry) update(entry *cacheEntry, answer, auth, extra []dns.RR, ttl int, authenticated bool) {
+func (ca *cacheEntry) update(entry *cacheEntry, answer *Answer, ttl int) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if entry.removed {
@@ -49,9 +46,6 @@ func (ca *cacheEntry) update(entry *cacheEntry, answer, auth, extra []dns.RR, tt
 	}
 	// just overwrite the previous one...
 	entry.answer = answer
-	entry.auth = auth
-	entry.extra = extra
-	entry.authenticated = authenticated
 	entry.ttl = ttl
 	entry.modified = time.Now()
 }
@@ -59,8 +53,8 @@ func (ca *cacheEntry) update(entry *cacheEntry, answer, auth, extra []dns.RR, tt
 // QuestionAnswerCache is used to cache responses to queries. The internal implementation
 // can be bypassed using this interface.
 type QuestionAnswerCache interface {
-	Get(q *Question) ([]dns.RR, []dns.RR, []dns.RR, bool, bool)
-	Add(q *Question, answer []dns.RR, auth []dns.RR, extra []dns.RR, authenticated, forever bool)
+	Get(q *Question) *Answer
+	Add(q *Question, answer *Answer, forever bool)
 }
 
 // BasicCache is a basic implementation of the QuestionAnswerCache interface
@@ -107,23 +101,33 @@ func (bc *BasicCache) prune(q *Question, id [sha1.Size]byte, ttl int) {
 }
 
 // Add adds a response to the cache using a index based on the question
-func (bc *BasicCache) Add(q *Question, answer, auth, extra []dns.RR, authenticated, forever bool) {
+func (bc *BasicCache) Add(q *Question, answer *Answer, forever bool) {
 	id := hashQuestion(q)
 	var ttl int
 	if !forever {
-		ttl = minTTL(append(answer, append(auth, extra...)...))
+		ttl = minTTL(append(answer.Answer, append(answer.Additional, answer.Authority...)...))
+		if ttl == 0 {
+			return
+		}
 	}
 	// should filter out OPT records here
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	if entry, present := bc.cache[id]; present {
-		bc.cache[id].update(entry, answer, auth, extra, ttl, authenticated)
+		bc.cache[id].update(entry, answer, ttl)
 		return
 	}
-	bc.cache[id] = &cacheEntry{answer, auth, extra, authenticated, ttl, time.Now(), false, sync.Mutex{}}
-	if ttl > 0 {
-		go bc.prune(q, id, ttl)
+	bc.cache[id] = &cacheEntry{
+		answer,
+		ttl,
+		time.Now(),
+		false,
+		sync.Mutex{},
 	}
+	if forever {
+		return
+	}
+	go bc.prune(q, id, ttl)
 }
 
 func (bc *BasicCache) getEntry(q *Question) (*cacheEntry, bool) {
@@ -135,16 +139,16 @@ func (bc *BasicCache) getEntry(q *Question) (*cacheEntry, bool) {
 }
 
 // Get returns the response for a question if it exists in the cache
-func (bc *BasicCache) Get(q *Question) ([]dns.RR, []dns.RR, []dns.RR, bool, bool) {
+func (bc *BasicCache) Get(q *Question) *Answer {
 	if entry, present := bc.getEntry(q); present {
 		entry.mu.Lock()
 		defer entry.mu.Unlock()
 		if entry.removed {
-			return nil, nil, nil, false, false
+			return nil
 		}
-		return entry.answer, entry.auth, entry.extra, entry.authenticated, true
+		return entry.answer
 	}
-	return nil, nil, nil, false, false
+	return nil
 }
 
 func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]int, map[string]string) {

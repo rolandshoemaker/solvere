@@ -20,7 +20,7 @@ var (
 	ErrBadAnswer              = errors.New("solvere/resolver: Query response returned a none Success (0) RCODE")
 )
 
-func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *rootNS, parentDSSet []dns.RR) (*QueryLog, error) {
+func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *Nameserver, parentDSSet []dns.RR) (*QueryLog, error) {
 	q := &Question{Name: auth.Zone, Type: dns.TypeDNSKEY}
 	r, log, err := rr.query(ctx, q, auth)
 	if err != nil {
@@ -78,7 +78,7 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 	// Only add response to cache if it wasn't a cache hit
 	if !log.CacheHit {
 		if rr.cache != nil {
-			go rr.cache.Add(q, r.Answer, r.Ns, r.Extra, true, false)
+			go rr.cache.Add(q, &Answer{r.Answer, r.Ns, r.Extra, dns.RcodeSuccess, true}, false)
 		}
 	}
 

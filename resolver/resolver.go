@@ -65,7 +65,7 @@ type QueryLog struct {
 	Referral    bool   `json:",omitempty"`
 
 	// Only present if CacheHit == false
-	NS *rootNS `json:",omitempty"`
+	NS *Nameserver `json:",omitempty"`
 
 	Composites []*QueryLog `json:",omitempty"`
 }
@@ -104,7 +104,7 @@ type Answer struct {
 	Authenticated bool
 }
 
-type rootNS struct {
+type Nameserver struct {
 	Name string
 	Addr string
 	Zone string
@@ -118,7 +118,7 @@ type RecursiveResolver struct {
 	c *dns.Client
 
 	cache           QuestionAnswerCache
-	rootNameservers []rootNS
+	rootNameservers []Nameserver
 }
 
 // NewRecursiveResolver returns an initialized RecursiveResolver. If cache is nil
@@ -138,19 +138,19 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 	for _, a := range addrs {
 		switch r := a.(type) {
 		case *dns.A:
-			rr.rootNameservers = append(rr.rootNameservers, rootNS{a.Header().Name, r.A.String(), "."})
+			rr.rootNameservers = append(rr.rootNameservers, Nameserver{a.Header().Name, r.A.String(), "."})
 		case *dns.AAAA:
-			rr.rootNameservers = append(rr.rootNameservers, rootNS{a.Header().Name, r.AAAA.String(), "."})
+			rr.rootNameservers = append(rr.rootNameservers, Nameserver{a.Header().Name, r.AAAA.String(), "."})
 		}
 	}
 	// Add root DNSSEC keys to cache indefinitely
 	if rr.cache != nil {
-		rr.cache.Add(&Question{Name: ".", Type: dns.TypeDNSKEY}, rootKeys, nil, nil, true, true)
+		rr.cache.Add(&Question{Name: ".", Type: dns.TypeDNSKEY}, &Answer{rootKeys, nil, nil, dns.RcodeSuccess, true}, true)
 	}
 	return rr
 }
 
-func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *rootNS) (*dns.Msg, *QueryLog, error) {
+func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Nameserver) (*dns.Msg, *QueryLog, error) {
 	ql := &QueryLog{Query: q, NS: auth}
 	s := time.Now()
 	defer func() { ql.Latency = time.Since(s) }()
@@ -158,14 +158,14 @@ func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *rootN
 	m.SetEdns0(4096, rr.useDNSSEC)
 	m.Question = []dns.Question{{Name: q.Name, Qtype: q.Type, Qclass: dns.ClassINET}}
 	if rr.cache != nil {
-		if answer, auth, extra, authenticated, present := rr.cache.Get(q); present {
+		if answer := rr.cache.Get(q); answer != nil {
 			m.Rcode = dns.RcodeSuccess
-			m.Answer = answer
-			m.Ns = auth
-			m.Extra = extra
+			m.Answer = answer.Answer
+			m.Ns = answer.Authority
+			m.Extra = answer.Additional
 			ql.CacheHit = true
 			ql.NS = nil
-			ql.DNSSECValid = authenticated
+			ql.DNSSECValid = answer.Authenticated
 			ql.Rcode = dns.RcodeSuccess
 			return m, ql, nil
 		}
@@ -187,7 +187,7 @@ func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *rootN
 	return r, ql, nil
 }
 
-func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*rootNS, error) {
+func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*Nameserver, error) {
 	// BUG(roland): LookupLog for lookupNS calls isn't included in parent chain
 	// BUG(roland): There is no maximum depth to Lookup -> lookupNS -> Lookup calls, looping is possible
 	// BUG(roland): I'm not sure how the lookup of a NS addr should be taken into account in terms of the
@@ -206,10 +206,10 @@ func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*rootNS
 	if len(addresses) == 0 {
 		return nil, ErrNoAuthorityAddress
 	}
-	return &rootNS{Name: name, Addr: addresses[mrand.Intn(len(addresses))].(*dns.A).A.String()}, nil // ewwww
+	return &Nameserver{Name: name, Addr: addresses[mrand.Intn(len(addresses))].(*dns.A).A.String()}, nil // ewwww
 }
 
-func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (*rootNS, error) {
+func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (*Nameserver, error) {
 	zones, _, nsToZone := splitAuthsByZone(auths, extras, rr.useIPv6)
 	if len(zones) == 0 {
 		if len(nsToZone) == 0 {
@@ -230,7 +230,7 @@ func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, 
 	// abuse how ranging over maps works to select a 'random' element
 	for ns, z := range nsToZone {
 		if len(zones[z]) > 0 {
-			return &rootNS{ns, zones[z][mrand.Intn(len(zones[z]))], z}, nil
+			return &Nameserver{ns, zones[z][mrand.Intn(len(zones[z]))], z}, nil
 		}
 	}
 	return nil, ErrNoNSAuthorties
@@ -293,10 +293,11 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 
 		// good response
 		if len(r.Answer) > 0 {
-			// cache
+			// BUG(roland): if after stripping dnssec records the only remaining record is a CNAME and the
+			//              question type wasn't CNAME then the alias should be chased
 			if !log.CacheHit {
 				if rr.cache != nil {
-					go rr.cache.Add(&q, r.Answer, r.Ns, r.Extra, validated, false)
+					go rr.cache.Add(&q, &Answer{r.Answer, r.Ns, r.Extra, r.Rcode, validated}, false)
 				}
 			}
 
@@ -315,7 +316,6 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 			if i == 0 || len(parentDSSet) > 0 {
 				parentDSSet = extractRRSet(r.Ns, dns.TypeDS, authority.Zone)
 			}
-			// XXX: Need to verify referrals that include NSEC DS denial
 			continue
 		}
 		return nil, ll, errors.New("No authority or additional records! IDK") // ???
