@@ -293,18 +293,19 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 			if r.Rcode == dns.RcodeNameError {
 				// checkNSEC3NXDOMAIN()
 				denialSet := extractAndMapRRSet(r.Ns, "", dns.TypeNSEC, dns.TypeNSEC3)
+				var nsecSet []dns.RR
 				switch {
 				case len(denialSet[dns.TypeNSEC]) > 0 && len(denialSet[dns.TypeNSEC3]) > 0:
 					// weird?
 					return nil, ll, errors.New("bad")
 				case len(denialSet[dns.TypeNSEC]) > 0:
-					err = verifyNSECProof(&q, denialSet[dns.TypeNSEC])
-					if err != nil {
-						log.Error = err.Error()
-						return nil, ll, err
-					}
+					nsecSet = denialSet[dns.TypeNSEC]
 				case len(denialSet[dns.TypeNSEC3]) > 0:
-					err = verifyNSECProof(&q, denialSet[dns.TypeNSEC])
+					nsecSet = denialSet[dns.TypeNSEC3]
+				}
+				// ???
+				if len(nsecSet) != 0 {
+					err = verifyNODATA(&q, nsecSet)
 					if err != nil {
 						log.Error = err.Error()
 						return nil, ll, err
@@ -330,21 +331,22 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 
 		// NODATA validation
 		if len(r.Answer) == 0 {
-			// BUG(roland): This should be moved into checkDNSKEY
+			// BUG(roland): This should be moved into checkDNSKEY maybe?
 			if len(r.Ns) > 0 {
 				denialSet := extractAndMapRRSet(r.Ns, "", dns.TypeNSEC, dns.TypeNSEC3)
+				var nsecSet []dns.RR
 				switch {
 				case len(denialSet[dns.TypeNSEC]) > 0 && len(denialSet[dns.TypeNSEC3]) > 0:
 					// weird?
 					return nil, ll, errors.New("bad")
 				case len(denialSet[dns.TypeNSEC]) > 0:
-					err = verifyNSECProof(&q, denialSet[dns.TypeNSEC])
-					if err != nil {
-						log.Error = err.Error()
-						return nil, ll, err
-					}
+					nsecSet = denialSet[dns.TypeNSEC]
 				case len(denialSet[dns.TypeNSEC3]) > 0:
-					err = verifyNSECProof(&q, denialSet[dns.TypeNSEC3])
+					nsecSet = denialSet[dns.TypeNSEC3]
+				}
+				// ???
+				if len(nsecSet) != 0 {
+					err = verifyNODATA(&q, nsecSet)
 					if err != nil {
 						log.Error = err.Error()
 						return nil, ll, err
