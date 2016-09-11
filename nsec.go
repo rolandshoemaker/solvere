@@ -13,6 +13,8 @@ var (
 	ErrNSECTypeExists       = errors.New("NSEC record shows question type exists")
 	ErrNSECMultipleCoverage = errors.New("Multiple NSEC records cover next closer/source of synthesis")
 	ErrNSECMissingCoverage  = errors.New("NSEC record missing for expected encloser")
+	ErrNSECBadDelegation    = errors.New("DS or SOA bit set in NSEC type map")
+	ErrNSECNSMissing        = errors.New("NS bit not set in NSEC type map")
 )
 
 func typesSet(set []uint16, types ...uint16) bool {
@@ -26,76 +28,6 @@ func typesSet(set []uint16, types ...uint16) bool {
 		}
 	}
 	return false
-}
-
-// RFC 5155 Section 8.4
-func verifyNameError(q *Question, nsec []dns.RR) error {
-	ce, _ := findClosestEncloser(q.Name, nsec)
-	if ce == "" {
-		return ErrNSECMissingCoverage
-	}
-	_, err := findMatching(q.Name, nsec)
-	if err != nil {
-		return err
-	}
-	_, err = findCoverer(fmt.Sprintf("*.%s", ce), nsec)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// verifyNSECNODATA verifies NSEC/NSEC3 records from a answer with a NOERROR (0) RCODE
-// and a empty Answer section
-func verifyNODATA(q *Question, nsec []dns.RR) error {
-	// RFC5155 Section 8.5
-	types, err := findMatching(q.Name, nsec)
-	if err == nil {
-		if typesSet(types, q.Type, dns.TypeCNAME) {
-			return ErrNSECTypeExists
-		}
-		if strings.HasPrefix(q.Name, "*.") {
-			// RFC 5155 Section 8.7
-			ce, _ := findClosestEncloser(q.Name, nsec)
-			if ce == "" {
-				return ErrNSECMissingCoverage
-			}
-			matchTypes, err := findMatching(fmt.Sprintf("*.%s", ce), nsec)
-			if err != nil {
-				return err
-			}
-			if typesSet(matchTypes, q.Type, dns.TypeCNAME) {
-				return ErrNSECTypeExists
-			}
-		}
-		return nil
-	}
-
-	if q.Type != dns.TypeDS {
-		return err
-	}
-
-	// RFC5155 Section 8.6
-	ce, nc := findClosestEncloser(q.Name, nsec)
-	if ce == "" {
-		return ErrNSECMissingCoverage
-	}
-	_, err = findCoverer(nc, nsec)
-	if err != nil {
-		return err
-	}
-	// BUG(roland): this needs to check the opt out bit
-	return nil
-}
-
-// RFC 5155 Section 8.8
-func verifyWildcardAnswer() {
-
-}
-
-// RFC 5155 Section 8.9
-func verifyDelegation() {
-
 }
 
 // findClosestEncloser finds the Closest Encloser and Next Encloser names for a name
@@ -182,4 +114,91 @@ func findCoverer(name string, nsec []dns.RR) ([]uint16, error) {
 		return nil, ErrNSECMissingCoverage
 	}
 	return types, nil
+}
+
+// RFC 5155 Section 8.4
+func verifyNameError(q *Question, nsec []dns.RR) error {
+	ce, _ := findClosestEncloser(q.Name, nsec)
+	if ce == "" {
+		return ErrNSECMissingCoverage
+	}
+	_, err := findMatching(q.Name, nsec)
+	if err != nil {
+		return err
+	}
+	_, err = findCoverer(fmt.Sprintf("*.%s", ce), nsec)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// verifyNSECNODATA verifies NSEC/NSEC3 records from a answer with a NOERROR (0) RCODE
+// and a empty Answer section
+func verifyNODATA(q *Question, nsec []dns.RR) error {
+	// RFC5155 Section 8.5
+	types, err := findMatching(q.Name, nsec)
+	if err == nil {
+		if typesSet(types, q.Type, dns.TypeCNAME) {
+			return ErrNSECTypeExists
+		}
+		if strings.HasPrefix(q.Name, "*.") {
+			// RFC 5155 Section 8.7
+			ce, _ := findClosestEncloser(q.Name, nsec)
+			if ce == "" {
+				return ErrNSECMissingCoverage
+			}
+			matchTypes, err := findMatching(fmt.Sprintf("*.%s", ce), nsec)
+			if err != nil {
+				return err
+			}
+			if typesSet(matchTypes, q.Type, dns.TypeCNAME) {
+				return ErrNSECTypeExists
+			}
+		}
+		return nil
+	}
+
+	if q.Type != dns.TypeDS {
+		return err
+	}
+
+	// RFC5155 Section 8.6
+	ce, nc := findClosestEncloser(q.Name, nsec)
+	if ce == "" {
+		return ErrNSECMissingCoverage
+	}
+	_, err = findCoverer(nc, nsec)
+	if err != nil {
+		return err
+	}
+	// BUG(roland): this needs to check the opt out bit
+	return nil
+}
+
+// RFC 5155 Section 8.8
+func verifyWildcardAnswer() {
+}
+
+// RFC 5155 Section 8.9
+func verifyDelegation(delegation string, nsec []dns.RR) error {
+	types, err := findMatching(delegation, nsec)
+	if err != nil {
+		ce, nc := findClosestEncloser(delegation, nsec)
+		if ce == "" {
+			return ErrNSECMissingCoverage
+		}
+		_, err = findCoverer(nc, nsec)
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+	if !typesSet(types, dns.TypeNS) {
+		return ErrNSECNSMissing
+	}
+	if typesSet(types, dns.TypeDS, dns.TypeSOA) {
+		return ErrNSECBadDelegation
+	}
+	return nil
 }

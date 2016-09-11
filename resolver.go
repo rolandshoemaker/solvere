@@ -330,6 +330,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		}
 
 		// NODATA validation
+		// BUG(roland): This catches referrals :/
 		if len(r.Answer) == 0 {
 			// BUG(roland): This should be moved into checkDNSKEY maybe?
 			if len(r.Ns) > 0 {
