@@ -59,8 +59,7 @@ type QuestionAnswerCache interface {
 
 // BasicCache is a basic implementation of the QuestionAnswerCache interface
 type BasicCache struct {
-	mu sync.RWMutex
-	// XXX: May want a secondary index of sha256(q.Name, q.Class) for NSEC denial checks...
+	mu    sync.RWMutex
 	cache map[[sha1.Size]byte]*cacheEntry
 }
 

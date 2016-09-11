@@ -104,6 +104,7 @@ type Answer struct {
 	Authenticated bool
 }
 
+// Nameserver describes a upstream authoritative nameserver
 type Nameserver struct {
 	Name string
 	Addr string
@@ -131,9 +132,9 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 		cache:     cache,
 	}
 	// Initialize root nameservers
-	addrs := extractRRSet(rootHints, dns.TypeA, "")
+	addrs := extractRRSet(rootHints, "", dns.TypeA)
 	if useIPv6 {
-		addrs = append(addrs, extractRRSet(rootHints, dns.TypeAAAA, "")...)
+		addrs = append(addrs, extractRRSet(rootHints, "", dns.TypeAAAA)...)
 	}
 	for _, a := range addrs {
 		switch r := a.(type) {
@@ -202,7 +203,7 @@ func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*Namese
 	if len(r.Answer) == 0 {
 		return nil, ErrNoAuthorityAddress
 	}
-	addresses := extractRRSet(r.Answer, dns.TypeA, name)
+	addresses := extractRRSet(r.Answer, name, dns.TypeA)
 	if len(addresses) == 0 {
 		return nil, ErrNoAuthorityAddress
 	}
@@ -288,6 +289,28 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		ll.DNSSECValid = validated
 
 		if r.Rcode != dns.RcodeSuccess {
+			// BUG(roland): This should be moved into checkDNSKEY (which needs a better name...)
+			if r.Rcode == dns.RcodeNameError {
+				// checkNSEC3NXDOMAIN()
+				denialSet := extractAndMapRRSet(r.Ns, "", dns.TypeNSEC, dns.TypeNSEC3)
+				switch {
+				case len(denialSet[dns.TypeNSEC]) > 0 && len(denialSet[dns.TypeNSEC3]) > 0:
+					// weird?
+					return nil, ll, errors.New("bad")
+				case len(denialSet[dns.TypeNSEC]) > 0:
+					err = verifyNSECProof(&q, denialSet[dns.TypeNSEC])
+					if err != nil {
+						log.Error = err.Error()
+						return nil, ll, err
+					}
+				case len(denialSet[dns.TypeNSEC3]) > 0:
+					err = verifyNSECProof(&q, denialSet[dns.TypeNSEC])
+					if err != nil {
+						log.Error = err.Error()
+						return nil, ll, err
+					}
+				}
+			}
 			return extractAnswer(r, validated), ll, nil
 		}
 
@@ -305,28 +328,60 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 			return extractAnswer(r, validated), ll, nil
 		}
 
-		// referral
+		// NODATA validation
+		if len(r.Answer) == 0 {
+			// BUG(roland): This should be moved into checkDNSKEY
+			if len(r.Ns) > 0 {
+				denialSet := extractAndMapRRSet(r.Ns, "", dns.TypeNSEC, dns.TypeNSEC3)
+				switch {
+				case len(denialSet[dns.TypeNSEC]) > 0 && len(denialSet[dns.TypeNSEC3]) > 0:
+					// weird?
+					return nil, ll, errors.New("bad")
+				case len(denialSet[dns.TypeNSEC]) > 0:
+					err = verifyNSECProof(&q, denialSet[dns.TypeNSEC])
+					if err != nil {
+						log.Error = err.Error()
+						return nil, ll, err
+					}
+				case len(denialSet[dns.TypeNSEC3]) > 0:
+					err = verifyNSECProof(&q, denialSet[dns.TypeNSEC3])
+					if err != nil {
+						log.Error = err.Error()
+						return nil, ll, err
+					}
+				}
+			}
+		}
+
+		// referral response
 		if len(r.Ns) > 0 {
 			log.Referral = true
 			// BUG(roland): NSEC DS delegation denials aren't checked
 			authority, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
 			if err != nil {
+				log.Error = err.Error()
 				return nil, ll, err
 			}
 			if i == 0 || len(parentDSSet) > 0 {
-				parentDSSet = extractRRSet(r.Ns, dns.TypeDS, authority.Zone)
+				parentDSSet = extractRRSet(r.Ns, authority.Zone, dns.TypeDS)
 			}
 			continue
 		}
+
+		// useless response...
 		return nil, ll, errors.New("No authority or additional records! IDK") // ???
 	}
 	return nil, ll, ErrTooManyReferrals
 }
 
-func extractRRSet(in []dns.RR, t uint16, name string) []dns.RR {
+func extractRRSet(in []dns.RR, name string, t ...uint16) []dns.RR {
 	out := []dns.RR{}
+	tMap := make(map[uint16]struct{}, len(t))
+	for _, t := range t {
+		tMap[t] = struct{}{}
+	}
 	for _, r := range in {
-		if r.Header().Rrtype == t {
+		if _, present := tMap[r.Header().Rrtype]; present {
 			if name != "" && name != r.Header().Name {
 				continue
 			}
@@ -352,4 +407,13 @@ func extractAndMapRRSet(in []dns.RR, name string, t ...uint16) map[uint16][]dns.
 		out[rt] = append(out[rt], r)
 	}
 	return out
+}
+
+func rrsetContains(rrset []dns.RR, rrtype uint16) bool {
+	for _, r := range rrset {
+		if r.Header().Rrtype == rrtype {
+			return true
+		}
+	}
+	return false
 }

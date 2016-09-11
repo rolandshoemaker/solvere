@@ -56,7 +56,7 @@ var RootKeys = []dns.RR{
     Hdr: dns.RR_Header{
       Name: ".",
        Rrtype: 48,
-       Class: 0,
+       Class: 1,
        Ttl: {{.TTL}},
     },
     Flags: {{.Flags}},
@@ -74,7 +74,7 @@ var RootNameservers = []dns.RR{
     Hdr: dns.RR_Header{
       Name: "{{.Name}}",
        Rrtype: {{.Rrtype}},
-       Class: 0,
+       Class: 1,
        Ttl: {{.TTL}},
     },
     {{if .Ns}}

@@ -2,7 +2,6 @@ package solvere
 
 import (
 	"errors"
-	// "fmt"
 	"time"
 
 	"github.com/miekg/dns"
@@ -17,7 +16,7 @@ var (
 	ErrNoSignatures           = errors.New("solvere: No RRSIG records for zone that should be signed")
 	ErrMissingDNSKEY          = errors.New("solvere: No matching DNSKEY found for RRSIG records")
 	ErrInvalidSignaturePeriod = errors.New("solvere: Incorrect signature validity period")
-	ErrBadAnswer              = errors.New("solvere: Query response returned a none Success (0) RCODE")
+	ErrBadAnswer              = errors.New("solvere: Query response returned a non-zero RCODE")
 )
 
 func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *Nameserver, parentDSSet []dns.RR) (*QueryLog, error) {
@@ -112,13 +111,13 @@ func (rr *RecursiveResolver) verifyRRSIG(msg *dns.Msg, keyMap map[uint16]*dns.DN
 		if len(section) == 0 {
 			continue
 		}
-		sigs := extractRRSet(section, dns.TypeRRSIG, "")
+		sigs := extractRRSet(section, "", dns.TypeRRSIG)
 		if len(sigs) == 0 {
 			return ErrNoSignatures
 		}
 		for _, sigRR := range sigs {
 			sig := sigRR.(*dns.RRSIG)
-			rest := extractRRSet(section, sig.TypeCovered, sig.Header().Name)
+			rest := extractRRSet(section, sig.Header().Name, sig.TypeCovered)
 			k, present := keyMap[sig.KeyTag]
 			if !present {
 				return ErrMissingDNSKEY
