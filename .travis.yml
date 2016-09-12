@@ -5,4 +5,4 @@ go:
   - 1.7
   - tip
 
-script: go test ./... -covermode=count
+script: go test ./... -covermode=count -v
