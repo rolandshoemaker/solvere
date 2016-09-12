@@ -149,35 +149,3 @@ func (bc *BasicCache) Get(q *Question) *Answer {
 	}
 	return nil
 }
-
-func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]int, map[string]string) {
-	zones := make(map[string][]string)
-	minTTLs := make(map[string]int)
-	nsToZone := make(map[string]string)
-
-	for _, rr := range auths {
-		if rr.Header().Rrtype == dns.TypeNS {
-			ns := rr.(*dns.NS)
-			nsToZone[ns.Ns] = rr.Header().Name
-		}
-	}
-
-	for _, rr := range extras {
-		zone, present := nsToZone[rr.Header().Name]
-		if present && (rr.Header().Rrtype == dns.TypeA || (useIPv6 && rr.Header().Rrtype == dns.TypeAAAA)) {
-			switch a := rr.(type) {
-			case *dns.A:
-				zones[zone] = append(zones[zone], a.A.String())
-			case *dns.AAAA:
-				if useIPv6 {
-					zones[zone] = append(zones[zone], a.AAAA.String())
-				}
-			}
-			if minTTLs[zone] == 0 || int(rr.Header().Ttl) < minTTLs[zone] {
-				minTTLs[zone] = int(rr.Header().Ttl)
-			}
-		}
-	}
-
-	return zones, minTTLs, nsToZone
-}

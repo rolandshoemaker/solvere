@@ -53,7 +53,7 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 	}
 
 	// Verify DNSKEY RRSIG using the ZSK keys
-	err = rr.verifyRRSIG(m, keyMap)
+	err = verifyRRSIG(m, keyMap)
 	if err != nil {
 		return log, err
 	}
@@ -61,12 +61,12 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 	// The only time this should be false is if the zone == .
 	if len(parentDSSet) > 0 {
 		// Verify RRSIGs from the message passed in using the KSK keys
-		err = rr.verifyRRSIG(r, keyMap)
+		err = verifyRRSIG(r, keyMap)
 		if err != nil {
 			return log, err
 		}
 		// Make sure the parent DS record matches one of the KSK DNSKEYS
-		err = rr.checkDS(keyMap, parentDSSet)
+		err = checkDS(keyMap, parentDSSet)
 		if err != nil {
 			return log, err
 		}
@@ -84,7 +84,7 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 	return log, nil
 }
 
-func (rr *RecursiveResolver) checkDS(keyMap map[uint16]*dns.DNSKEY, parentDSSet []dns.RR) error {
+func checkDS(keyMap map[uint16]*dns.DNSKEY, parentDSSet []dns.RR) error {
 	for _, r := range parentDSSet {
 		parentDS := r.(*dns.DS)
 		// This KSK may not actually be of the right type but that
@@ -106,7 +106,7 @@ func (rr *RecursiveResolver) checkDS(keyMap map[uint16]*dns.DNSKEY, parentDSSet 
 	return ErrMissingKSK
 }
 
-func (rr *RecursiveResolver) verifyRRSIG(msg *dns.Msg, keyMap map[uint16]*dns.DNSKEY) error {
+func verifyRRSIG(msg *dns.Msg, keyMap map[uint16]*dns.DNSKEY) error {
 	for _, section := range [][]dns.RR{msg.Answer, msg.Ns} {
 		if len(section) == 0 {
 			continue
@@ -118,6 +118,9 @@ func (rr *RecursiveResolver) verifyRRSIG(msg *dns.Msg, keyMap map[uint16]*dns.DN
 		for _, sigRR := range sigs {
 			sig := sigRR.(*dns.RRSIG)
 			rest := extractRRSet(section, sig.Header().Name, sig.TypeCovered)
+			if len(rest) == 0 {
+				return errors.New("Records missing for signature")
+			}
 			k, present := keyMap[sig.KeyTag]
 			if !present {
 				return ErrMissingDNSKEY

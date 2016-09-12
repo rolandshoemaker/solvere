@@ -81,19 +81,6 @@ type LookupLog struct {
 	Composites []*QueryLog
 }
 
-type authMap map[string][]string
-
-func buildAuthMap(auths []dns.RR, extras []dns.RR) *authMap {
-	am := make(authMap, len(extras))
-	for _, a := range auths {
-		if a.Header().Rrtype == dns.TypeNS {
-			ns := a.(*dns.NS)
-			am[ns.Hdr.Name] = append(am[ns.Hdr.Name], ns.Ns)
-		}
-	}
-	return &am
-}
-
 // Answer contains the answer to a iterative resolution performed
 // by RecursiveResolver.Lookup
 type Answer struct {
@@ -208,6 +195,38 @@ func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*Namese
 		return nil, ErrNoAuthorityAddress
 	}
 	return &Nameserver{Name: name, Addr: addresses[mrand.Intn(len(addresses))].(*dns.A).A.String()}, nil // ewwww
+}
+
+func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]int, map[string]string) {
+	zones := make(map[string][]string)
+	minTTLs := make(map[string]int)
+	nsToZone := make(map[string]string)
+
+	for _, rr := range auths {
+		if rr.Header().Rrtype == dns.TypeNS {
+			ns := rr.(*dns.NS)
+			nsToZone[ns.Ns] = rr.Header().Name
+		}
+	}
+
+	for _, rr := range extras {
+		zone, present := nsToZone[rr.Header().Name]
+		if present && (rr.Header().Rrtype == dns.TypeA || (useIPv6 && rr.Header().Rrtype == dns.TypeAAAA)) {
+			switch a := rr.(type) {
+			case *dns.A:
+				zones[zone] = append(zones[zone], a.A.String())
+			case *dns.AAAA:
+				if useIPv6 {
+					zones[zone] = append(zones[zone], a.AAAA.String())
+				}
+			}
+			if minTTLs[zone] == 0 || int(rr.Header().Ttl) < minTTLs[zone] {
+				minTTLs[zone] = int(rr.Header().Ttl)
+			}
+		}
+	}
+
+	return zones, minTTLs, nsToZone
 }
 
 func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (*Nameserver, error) {
@@ -387,13 +406,4 @@ func extractAndMapRRSet(in []dns.RR, name string, t ...uint16) map[uint16][]dns.
 		out[rt] = append(out[rt], r)
 	}
 	return out
-}
-
-func rrsetContains(rrset []dns.RR, rrtype uint16) bool {
-	for _, r := range rrset {
-		if r.Header().Rrtype == rrtype {
-			return true
-		}
-	}
-	return false
 }
