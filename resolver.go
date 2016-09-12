@@ -25,12 +25,12 @@ func init() {
 	b := [8]byte{}
 	_, err := rand.Read(b[:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read bytes for PSRNG initialization: %s\n", err)
+		fmt.Fprintf(os.Stderr, "solvere: Failed to read bytes for PSRNG initialization: %s\n", err)
 		return
 	}
 	i, err := binary.ReadVarint(bytes.NewBuffer(b[:]))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read bytes for PSRNG initialization: %s\n", err)
+		fmt.Fprintf(os.Stderr, "solvere: Failed to read bytes for PSRNG initialization: %s\n", err)
 		return
 	}
 	mrand.Seed(i)
@@ -291,21 +291,9 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		if r.Rcode != dns.RcodeSuccess {
 			// BUG(roland): This should be moved into checkDNSKEY (which needs a better name...)
 			if r.Rcode == dns.RcodeNameError {
-				// checkNSEC3NXDOMAIN()
-				denialSet := extractAndMapRRSet(r.Ns, "", dns.TypeNSEC, dns.TypeNSEC3)
-				var nsecSet []dns.RR
-				switch {
-				case len(denialSet[dns.TypeNSEC]) > 0 && len(denialSet[dns.TypeNSEC3]) > 0:
-					// weird?
-					return nil, ll, errors.New("bad")
-				case len(denialSet[dns.TypeNSEC]) > 0:
-					nsecSet = denialSet[dns.TypeNSEC]
-				case len(denialSet[dns.TypeNSEC3]) > 0:
-					nsecSet = denialSet[dns.TypeNSEC3]
-				}
-				// ???
+				nsecSet := extractRRSet(r.Ns, "", dns.TypeNSEC3)
 				if len(nsecSet) != 0 {
-					err = verifyNODATA(&q, nsecSet)
+					err = verifyNameError(&q, nsecSet)
 					if err != nil {
 						log.Error = err.Error()
 						return nil, ll, err
@@ -334,18 +322,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		if len(r.Answer) == 0 {
 			// BUG(roland): This should be moved into checkDNSKEY maybe?
 			if len(r.Ns) > 0 {
-				denialSet := extractAndMapRRSet(r.Ns, "", dns.TypeNSEC, dns.TypeNSEC3)
-				var nsecSet []dns.RR
-				switch {
-				case len(denialSet[dns.TypeNSEC]) > 0 && len(denialSet[dns.TypeNSEC3]) > 0:
-					// weird?
-					return nil, ll, errors.New("bad")
-				case len(denialSet[dns.TypeNSEC]) > 0:
-					nsecSet = denialSet[dns.TypeNSEC]
-				case len(denialSet[dns.TypeNSEC3]) > 0:
-					nsecSet = denialSet[dns.TypeNSEC3]
-				}
-				// ???
+				nsecSet := extractRRSet(r.Ns, "", dns.TypeNSEC3)
 				if len(nsecSet) != 0 {
 					err = verifyNODATA(&q, nsecSet)
 					if err != nil {
@@ -359,7 +336,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		// referral response
 		if len(r.Ns) > 0 {
 			log.Referral = true
-			// BUG(roland): NSEC DS delegation denials aren't checked
+			// BUG(roland): NSEC# DS delegation denials aren't checked
 			authority, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
 			if err != nil {
 				log.Error = err.Error()

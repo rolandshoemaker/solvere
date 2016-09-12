@@ -39,13 +39,7 @@ func findClosestEncloser(name string, nsec []dns.RR) (string, string) {
 	for i := 0; i < len(labelIndices); i++ {
 		z := name[labelIndices[i]:]
 		for _, rr := range nsec {
-			var n dns.Denialer
-			switch ns := rr.(type) {
-			case *dns.NSEC:
-				n = dns.Denialer(ns)
-			case *dns.NSEC3:
-				n = dns.Denialer(ns)
-			}
+			n := rr.(*dns.NSEC3)
 			if n.Match(z) {
 				ce = z
 				if i == 0 {
@@ -53,7 +47,13 @@ func findClosestEncloser(name string, nsec []dns.RR) (string, string) {
 				} else {
 					nc = name[labelIndices[i-1]:]
 				}
-				return ce, nc
+				for _, r := range nsec {
+					n = r.(*dns.NSEC3)
+					if n.Cover(nc) {
+						return ce, nc
+					}
+				}
+				return "", ""
 			}
 		}
 	}
@@ -61,59 +61,23 @@ func findClosestEncloser(name string, nsec []dns.RR) (string, string) {
 }
 
 func findMatching(name string, nsec []dns.RR) ([]uint16, error) {
-	types := []uint16{}
 	for _, rr := range nsec {
-		var n dns.Denialer
-		switch ns := rr.(type) {
-		case *dns.NSEC:
-			n = dns.Denialer(ns)
-		case *dns.NSEC3:
-			n = dns.Denialer(ns)
-		}
+		n := rr.(*dns.NSEC3)
 		if n.Match(name) {
-			if types != nil {
-				return nil, ErrNSECMultipleCoverage
-			}
-			switch ns := rr.(type) {
-			case *dns.NSEC:
-				types = ns.TypeBitMap
-			case *dns.NSEC3:
-				types = ns.TypeBitMap
-			}
+			return n.TypeBitMap, nil
 		}
 	}
-	if types == nil {
-		return nil, ErrNSECMissingCoverage
-	}
-	return types, nil
+	return nil, ErrNSECMissingCoverage
 }
 
 func findCoverer(name string, nsec []dns.RR) ([]uint16, error) {
-	types := []uint16{}
 	for _, rr := range nsec {
-		var n dns.Denialer
-		switch ns := rr.(type) {
-		case *dns.NSEC:
-			n = dns.Denialer(ns)
-		case *dns.NSEC3:
-			n = dns.Denialer(ns)
-		}
+		n := rr.(*dns.NSEC3)
 		if n.Cover(name) {
-			if types != nil {
-				return nil, ErrNSECMultipleCoverage
-			}
-			switch ns := rr.(type) {
-			case *dns.NSEC:
-				types = ns.TypeBitMap
-			case *dns.NSEC3:
-				types = ns.TypeBitMap
-			}
+			return n.TypeBitMap, nil
 		}
 	}
-	if types == nil {
-		return nil, ErrNSECMissingCoverage
-	}
-	return types, nil
+	return nil, ErrNSECMissingCoverage
 }
 
 // RFC 5155 Section 8.4
@@ -122,11 +86,7 @@ func verifyNameError(q *Question, nsec []dns.RR) error {
 	if ce == "" {
 		return ErrNSECMissingCoverage
 	}
-	_, err := findMatching(q.Name, nsec)
-	if err != nil {
-		return err
-	}
-	_, err = findCoverer(fmt.Sprintf("*.%s", ce), nsec)
+	_, err := findCoverer(fmt.Sprintf("*.%s", ce), nsec)
 	if err != nil {
 		return err
 	}
