@@ -102,6 +102,7 @@ func verifyNODATA(q *Question, nsec []dns.RR) error {
 		if typesSet(types, q.Type, dns.TypeCNAME) {
 			return ErrNSECTypeExists
 		}
+		// BUG(roland): pretty sure this is 100% incorrect
 		if strings.HasPrefix(q.Name, "*.") {
 			// RFC 5155 Section 8.7
 			ce, _ := findClosestEncloser(q.Name, nsec)
