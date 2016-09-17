@@ -70,14 +70,14 @@ func findMatching(name string, nsec []dns.RR) ([]uint16, error) {
 	return nil, ErrNSECMissingCoverage
 }
 
-func findCoverer(name string, nsec []dns.RR) ([]uint16, error) {
+func findCoverer(name string, nsec []dns.RR) ([]uint16, bool, error) {
 	for _, rr := range nsec {
 		n := rr.(*dns.NSEC3)
 		if n.Cover(name) {
-			return n.TypeBitMap, nil
+			return n.TypeBitMap, (n.Flags & 1) == 1, nil
 		}
 	}
-	return nil, ErrNSECMissingCoverage
+	return nil, false, ErrNSECMissingCoverage
 }
 
 // RFC 5155 Section 8.4
@@ -86,7 +86,7 @@ func verifyNameError(q *Question, nsec []dns.RR) error {
 	if ce == "" {
 		return ErrNSECMissingCoverage
 	}
-	_, err := findCoverer(fmt.Sprintf("*.%s", ce), nsec)
+	_, _, err := findCoverer(fmt.Sprintf("*.%s", ce), nsec)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func verifyNODATA(q *Question, nsec []dns.RR) error {
 		if ce == "" {
 			return ErrNSECMissingCoverage
 		}
-		_, err = findCoverer(nc, nsec)
+		_, _, err = findCoverer(nc, nsec)
 		if err != nil {
 			return err
 		}
@@ -149,9 +149,12 @@ func verifyDelegation(delegation string, nsec []dns.RR) error {
 		if ce == "" {
 			return ErrNSECMissingCoverage
 		}
-		_, err = findCoverer(nc, nsec)
+		_, optOut, err := findCoverer(nc, nsec)
 		if err != nil {
 			return err
+		}
+		if !optOut {
+			return errors.New("solvere: Opt-Out bit not set for NSEC3 record covering next closer")
 		}
 		return nil
 	}
