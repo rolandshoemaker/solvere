@@ -9,12 +9,12 @@ import (
 )
 
 var (
-	ErrNSECMismatch         = errors.New("solvere: NSEC record doesn't match question")
-	ErrNSECTypeExists       = errors.New("solvere: NSEC record shows question type exists")
-	ErrNSECMultipleCoverage = errors.New("solvere: Multiple NSEC records cover next closer/source of synthesis")
-	ErrNSECMissingCoverage  = errors.New("solvere: NSEC record missing for expected encloser")
-	ErrNSECBadDelegation    = errors.New("solvere: DS or SOA bit set in NSEC type map")
-	ErrNSECNSMissing        = errors.New("solvere: NS bit not set in NSEC type map")
+	ErrNSECMismatch         = errors.New("solvere: NSEC3 record doesn't match question")
+	ErrNSECTypeExists       = errors.New("solvere: NSEC3 record shows question type exists")
+	ErrNSECMultipleCoverage = errors.New("solvere: Multiple NSEC3 records cover next closer/source of synthesis")
+	ErrNSECMissingCoverage  = errors.New("solvere: NSEC3 record missing for expected encloser")
+	ErrNSECBadDelegation    = errors.New("solvere: DS or SOA bit set in NSEC3 type map")
+	ErrNSECNSMissing        = errors.New("solvere: NS bit not set in NSEC3 type map")
 )
 
 func typesSet(set []uint16, types ...uint16) bool {
@@ -30,8 +30,8 @@ func typesSet(set []uint16, types ...uint16) bool {
 	return false
 }
 
-// findClosestEncloser finds the Closest Encloser and Next Encloser names for a name
-// in a set of NSEC/NSEC3 records
+// findClosestEncloser finds the Closest Encloser and Next Closer names for a name
+// in a set of NSEC3 records
 func findClosestEncloser(name string, nsec []dns.RR) (string, string) {
 	// RFC 5155 Section 8.3 (ish)
 	labelIndices := dns.Split(name)

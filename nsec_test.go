@@ -1,12 +1,33 @@
 package solvere
 
 import (
-	// "fmt"
 	"strings"
 	"testing"
 
 	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
+
+func makeNSEC3(name, next string, optOut bool, types []uint16) *dns.NSEC3 {
+	salt := "FFFF"
+	flags := uint8(0)
+	if optOut {
+		flags = flags | 0x01
+	}
+	return &dns.NSEC3{
+		Hdr: dns.RR_Header{
+			Name:  dns.HashName(name, dns.SHA1, 2, salt) + ".com",
+			Class: dns.ClassINET,
+		},
+		Hash:       dns.SHA1,
+		Flags:      flags,
+		Iterations: 2,
+		SaltLength: 2,
+		Salt:       salt,
+		HashLength: 20,
+		NextDomain: dns.HashName(next, dns.SHA1, 2, salt),
+		TypeBitMap: types,
+	}
+}
 
 func zoneToRecords(z string) ([]dns.RR, error) {
 	records := []dns.RR{}
@@ -106,14 +127,79 @@ func TestVerifyWildcardAnswer(t *testing.T) {
 }
 
 func TestVerifyDelegation(t *testing.T) {
-	records, err := zoneToRecords(`h9p7u7tr2u91d0v0ljs9l1gidnp90u3h.org. 86400 IN NSEC3 1 1 1 D399EAAB H9PARR669T6U8O1GSG9E1LMITK4DEM0T NS SOA RRSIG DNSKEY NSEC3PARAM
-6tudcfrknr572i5c0uc4sacr7a29acu9.org. 86400 IN NSEC3 1 1 1 D399EAAB 6TV23NTQ2DDES3UTPMI2JLUCK6G3DPH6 NS DS RRSIG`)
+	// Valid direct delegation
+	records := []dns.RR{
+		makeNSEC3("a.b.com.", "b.b.com.", false, []uint16{dns.TypeNS}),
+	}
+	err := verifyDelegation("a.b.com.", records)
+	if err != nil {
+		t.Fatalf("verifyDelegation failed for a direct delegation match: %s", err)
+	}
+
+	// Invalid direct delegation, NS bit not set
+	records = []dns.RR{
+		makeNSEC3("a.b.com.", "b.b.com.", false, nil),
+	}
+	err = verifyDelegation("a.b.com.", records)
+	if err == nil {
+		t.Fatal("verifyDelegation didn't fail for a direct delegation with NS bit not set")
+	}
+
+	// Invalid direct delegation, DS bit set
+	records = []dns.RR{
+		makeNSEC3("a.b.com.", "b.b.com.", false, []uint16{dns.TypeNS, dns.TypeDS}),
+	}
+	err = verifyDelegation("a.b.com.", records)
+	if err == nil {
+		t.Fatal("verifyDelegation didn't fail for a direct delegation with DS bit set")
+	}
+
+	// Invalid direct delegation, SOA bit set
+	records = []dns.RR{
+		makeNSEC3("a.b.com.", "b.b.com.", false, []uint16{dns.TypeNS, dns.TypeSOA}),
+	}
+	err = verifyDelegation("a.b.com.", records)
+	if err == nil {
+		t.Fatal("verifyDelegation didn't fail for a direct delegation with SOA bit set")
+	}
+
+	// Valid Opt-Out delegation
+	records = []dns.RR{
+		makeNSEC3("com.", "a.com.", false, []uint16{dns.TypeNS}),  // CE
+		makeNSEC3("a.com.", "e.com.", true, []uint16{dns.TypeNS}), // NC coverer
+	}
+	err = verifyDelegation("b.com.", records)
+	if err != nil {
+		t.Fatalf("verifyDelegation failed for a opt-out delegation match: %s", err)
+	}
+
+	// Invalid Opt-Out delegation, no NC
+	records = []dns.RR{
+		makeNSEC3("com.", "a.com.", false, []uint16{dns.TypeNS}), // CE
+	}
+	err = verifyDelegation("b.com.", records)
+	if err == nil {
+		t.Fatal("verifyDelegation didn't fail for a direct delegation with no Next Closer")
+	}
+
+	// Invalid Opt-Out delegation, opt-out bit not set on NC
+	records = []dns.RR{
+		makeNSEC3("com.", "a.com.", false, []uint16{dns.TypeNS}),   // CE
+		makeNSEC3("a.com.", "e.com.", false, []uint16{dns.TypeNS}), // NC coverer
+	}
+	err = verifyDelegation("b.com.", records)
+	if err == nil {
+		t.Fatal("verifyDelegation didn't fail for a direct delegation with Opt-Out bit not set on NC")
+	}
+
+	// RFC5155 Appendix B.3
+	records, err = zoneToRecords(`35mthgpgcu1qg68fab165klnsnk3dpvl.example. 3600 IN NSEC3 1 1 12 aabbccdd b4um86eghhds6nea196smvmlo4ors995 NS DS RRSIG
+0p9mhaveqvm6t7vbl5lop2u3t2rp3tom.example. 3600 IN NSEC3 1 1 12 aabbccdd 2t7b4g4vsa5smi47k61mv5bv1a22bojr MX DNSKEY NS SOA NSEC3PARAM RRSIG`)
 	if err != nil {
 		t.Fatalf("Failed to parse NSEC3 test records: %s", err)
 	}
-
-	err = verifyDelegation("helloworld.letsencrypt.org.", records)
+	err = verifyDelegation("c.example.", records)
 	if err != nil {
-		t.Fatalf("NSEC3 verification failed: %s", err)
+		t.Fatalf("verifyDelegation failed wtih opt out delegation example from RFC5155: %s", err)
 	}
 }
