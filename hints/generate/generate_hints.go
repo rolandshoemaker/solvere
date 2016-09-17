@@ -10,7 +10,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/miekg/dns"
+	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
 
 type dk struct {
@@ -46,7 +46,7 @@ package hints
 import (
   "net"
 
-  "github.com/miekg/dns"
+	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
 
 // RootKeys contains the DNSKEY records for the root zone
