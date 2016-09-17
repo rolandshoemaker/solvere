@@ -1,0 +1,30 @@
+{
+	"version": 0,
+	"dependencies": [
+		{
+			"importpath": "github.com/miekg/dns",
+			"repository": "https://github.com/miekg/dns",
+			"vcs": "git",
+			"revision": "db96a2b759cdef4f11a34506a42eb8d1290c598e",
+			"branch": "master",
+			"notests": true
+		},
+		{
+			"importpath": "github.com/rolandshoemaker/dns",
+			"repository": "https://github.com/rolandshoemaker/dns",
+			"vcs": "git",
+			"revision": "810ee96017cbb53ec7491ece3b9a0a1d9fb6209c",
+			"branch": "token-fix",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/net/context",
+			"repository": "https://go.googlesource.com/net",
+			"vcs": "git",
+			"revision": "71a035914f99bb58fe82eac0f1289f10963d876c",
+			"branch": "master",
+			"path": "/context",
+			"notests": true
+		}
+	]
+}

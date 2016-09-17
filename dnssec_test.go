@@ -40,6 +40,12 @@ func TestCheckDS(t *testing.T) {
 	if err == nil {
 		t.Fatal("checkDS didn't fail with mismatching DS record")
 	}
+
+	k.PublicKey = "broken"
+	err = checkDS(keyMap, dsSet)
+	if err == nil {
+		t.Fatal("checkDS didn't fail with malformed KSK record")
+	}
 }
 
 func TestVerifyRRSIG(t *testing.T) {

@@ -9,12 +9,12 @@ import (
 )
 
 var (
-	ErrNSECMismatch         = errors.New("NSEC record doesn't match question")
-	ErrNSECTypeExists       = errors.New("NSEC record shows question type exists")
-	ErrNSECMultipleCoverage = errors.New("Multiple NSEC records cover next closer/source of synthesis")
-	ErrNSECMissingCoverage  = errors.New("NSEC record missing for expected encloser")
-	ErrNSECBadDelegation    = errors.New("DS or SOA bit set in NSEC type map")
-	ErrNSECNSMissing        = errors.New("NS bit not set in NSEC type map")
+	ErrNSECMismatch         = errors.New("solvere: NSEC record doesn't match question")
+	ErrNSECTypeExists       = errors.New("solvere: NSEC record shows question type exists")
+	ErrNSECMultipleCoverage = errors.New("solvere: Multiple NSEC records cover next closer/source of synthesis")
+	ErrNSECMissingCoverage  = errors.New("solvere: NSEC record missing for expected encloser")
+	ErrNSECBadDelegation    = errors.New("solvere: DS or SOA bit set in NSEC type map")
+	ErrNSECNSMissing        = errors.New("solvere: NS bit not set in NSEC type map")
 )
 
 func typesSet(set []uint16, types ...uint16) bool {
@@ -98,42 +98,42 @@ func verifyNameError(q *Question, nsec []dns.RR) error {
 func verifyNODATA(q *Question, nsec []dns.RR) error {
 	// RFC5155 Section 8.5
 	types, err := findMatching(q.Name, nsec)
-	if err == nil {
-		if typesSet(types, q.Type, dns.TypeCNAME) {
-			return ErrNSECTypeExists
+	if err != nil {
+		if q.Type != dns.TypeDS {
+			return err
 		}
-		// BUG(roland): pretty sure this is 100% incorrect
-		if strings.HasPrefix(q.Name, "*.") {
-			// RFC 5155 Section 8.7
-			ce, _ := findClosestEncloser(q.Name, nsec)
-			if ce == "" {
-				return ErrNSECMissingCoverage
-			}
-			matchTypes, err := findMatching(fmt.Sprintf("*.%s", ce), nsec)
-			if err != nil {
-				return err
-			}
-			if typesSet(matchTypes, q.Type, dns.TypeCNAME) {
-				return ErrNSECTypeExists
-			}
+
+		// RFC5155 Section 8.6
+		ce, nc := findClosestEncloser(q.Name, nsec)
+		if ce == "" {
+			return ErrNSECMissingCoverage
 		}
+		_, err = findCoverer(nc, nsec)
+		if err != nil {
+			return err
+		}
+		// BUG(roland): this needs to check the opt out bit
 		return nil
 	}
 
-	if q.Type != dns.TypeDS {
-		return err
+	if typesSet(types, q.Type, dns.TypeCNAME) {
+		return ErrNSECTypeExists
 	}
-
-	// RFC5155 Section 8.6
-	ce, nc := findClosestEncloser(q.Name, nsec)
-	if ce == "" {
-		return ErrNSECMissingCoverage
+	// BUG(roland): pretty sure this is 100% incorrect, should prob be its own method...
+	if strings.HasPrefix(q.Name, "*.") {
+		// RFC 5155 Section 8.7
+		ce, _ := findClosestEncloser(q.Name, nsec)
+		if ce == "" {
+			return ErrNSECMissingCoverage
+		}
+		matchTypes, err := findMatching(fmt.Sprintf("*.%s", ce), nsec)
+		if err != nil {
+			return err
+		}
+		if typesSet(matchTypes, q.Type, dns.TypeCNAME) {
+			return ErrNSECTypeExists
+		}
 	}
-	_, err = findCoverer(nc, nsec)
-	if err != nil {
-		return err
-	}
-	// BUG(roland): this needs to check the opt out bit
 	return nil
 }
 

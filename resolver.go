@@ -1,6 +1,5 @@
-// Package solvere provides an implementation of a recursive, validating,
-// DNSSEC aware DNS resolver. It also provides a basic question and answer
-// cache implementation.
+// Package solvere provides an implementation of a recursive, validating, DNSSEC aware DNS resolver, and
+// a basic question and answer cache implementation.
 package solvere
 
 import (
@@ -308,13 +307,14 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		ll.DNSSECValid = validated
 
 		if r.Rcode != dns.RcodeSuccess {
-			// BUG(roland): This should be moved into checkDNSKEY (which needs a better name...)
 			if r.Rcode == dns.RcodeNameError {
 				nsecSet := extractRRSet(r.Ns, "", dns.TypeNSEC3)
-				if len(nsecSet) != 0 {
+				if len(nsecSet) != 0 { // if the zone is signed and this is missing its a failure...
 					err = verifyNameError(&q, nsecSet)
 					if err != nil {
 						log.Error = err.Error()
+						log.DNSSECValid = false
+						ll.DNSSECValid = false
 						return nil, ll, err
 					}
 				}

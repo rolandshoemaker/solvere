@@ -97,7 +97,7 @@ func TestVerifyNODATA(t *testing.T) {
 
 	err = verifyNODATA(&Question{Name: "whitehouse.gov.", Type: dns.TypeDS}, records)
 	if err != nil {
-		t.Fatalf("Failed to parse NSEC3 test records: %s", err)
+		t.Fatalf("verifyNODATA failed: %s", err)
 	}
 }
 
