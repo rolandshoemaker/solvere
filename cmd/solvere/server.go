@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/miekg/dns"
+	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 	"golang.org/x/net/context"
 
 	"github.com/rolandshoemaker/solvere"

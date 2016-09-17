@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/miekg/dns"
+	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
 
 func zoneToRecords(z string) ([]dns.RR, error) {

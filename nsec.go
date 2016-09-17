@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/miekg/dns"
+	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
 
 var (

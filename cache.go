@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
+	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
 
 func hashQuestion(q *Question) [sha1.Size]byte {

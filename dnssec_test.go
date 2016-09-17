@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
 
 func TestCheckDNSKEY(t *testing.T) {
