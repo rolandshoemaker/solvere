@@ -336,39 +336,42 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 			return extractAnswer(r, validated), ll, nil
 		}
 
-		// NODATA validation
-		// BUG(roland): This catches referrals :/
-		if len(r.Answer) == 0 {
-			// BUG(roland): This should be moved into checkDNSKEY maybe?
-			if len(r.Ns) > 0 {
-				nsecSet := extractRRSet(r.Ns, "", dns.TypeNSEC3)
-				if len(nsecSet) != 0 {
-					err = verifyNODATA(&q, nsecSet)
-					if err != nil {
-						log.Error = err.Error()
-						return nil, ll, err
-					}
+		// NODATA or referral response
+		nsecSet := extractRRSet(r.Ns, "", dns.TypeNSEC3)
+		if len(r.Ns) == 0 {
+			// NODATA response
+			if len(nsecSet) != 0 { // if the zone is signed and this is missing its a failure...
+				err = verifyNODATA(&q, nsecSet)
+				if err != nil {
+					log.Error = err.Error()
+					log.DNSSECValid = false
+					ll.DNSSECValid = false
+					return nil, ll, err
 				}
 			}
+			return &Answer{Rcode: dns.RcodeSuccess, Authenticated: validated}, ll, nil // ignore anything in additional section
 		}
 
-		// referral response
-		if len(r.Ns) > 0 {
-			log.Referral = true
-			// BUG(roland): NSEC# DS delegation denials aren't checked
-			authority, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
+		// Referral response
+		log.Referral = true
+		// BUG(roland): NSEC# DS delegation denials aren't checked
+		authority, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
+		if err != nil {
+			log.Error = err.Error()
+			return nil, ll, err
+		}
+		if len(nsecSet) != 0 { // if the zone is signed and this is missing its a failure...
+			err = verifyDelegation(authority.Zone, nsecSet)
 			if err != nil {
 				log.Error = err.Error()
+				log.DNSSECValid = false
+				ll.DNSSECValid = false
 				return nil, ll, err
 			}
-			if i == 0 || len(parentDSSet) > 0 {
-				parentDSSet = extractRRSet(r.Ns, authority.Zone, dns.TypeDS)
-			}
-			continue
 		}
-
-		// useless response...
-		return nil, ll, errors.New("No authority or additional records! IDK") // ???
+		if i == 0 || len(parentDSSet) > 0 {
+			parentDSSet = extractRRSet(r.Ns, authority.Zone, dns.TypeDS)
+		}
 	}
 	return nil, ll, ErrTooManyReferrals
 }
