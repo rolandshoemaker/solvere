@@ -292,7 +292,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 			validated = log.DNSSECValid
 		}
 		if (i == 0 || len(parentDSSet) > 0) && !log.CacheHit {
-			dkLog, err := rr.checkDNSKEY(ctx, r, authority, parentDSSet)
+			dkLog, err := rr.checkSignatures(ctx, r, authority, parentDSSet)
 			log.Composites = append(log.Composites, dkLog)
 			if err != nil {
 				log.Error = err.Error()

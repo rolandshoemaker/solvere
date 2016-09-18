@@ -20,17 +20,17 @@ var (
 	ErrBadAnswer              = errors.New("solvere: Query response returned a non-zero RCODE")
 )
 
-func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *Nameserver, parentDSSet []dns.RR) (*LookupLog, error) {
+func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver, parentDSSet []dns.RR) (map[uint16]*dns.DNSKEY, *LookupLog, func(), error) {
 	q := &Question{Name: auth.Zone, Type: dns.TypeDNSKEY}
 	r, log, err := rr.query(ctx, q, auth)
 	if err != nil {
-		return log, err
+		return nil, log, nil, err
 	}
 
 	if len(r.Answer) == 0 {
-		return log, ErrNoDNSKEY
+		return nil, log, nil, ErrNoDNSKEY
 	} else if r.Rcode != dns.RcodeSuccess {
-		return log, ErrBadAnswer
+		return nil, log, nil, ErrBadAnswer
 	}
 
 	keyMap := make(map[uint16]*dns.DNSKEY)
@@ -46,13 +46,7 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 	}
 
 	if len(keyMap) == 0 {
-		return log, ErrNoDNSKEY
-	}
-
-	// Verify DNSKEY RRSIG using the ZSK keys
-	err = verifyRRSIG(m, keyMap)
-	if err != nil {
-		return log, err
+		return nil, log, nil, ErrNoDNSKEY // ???
 	}
 
 	// The only time this should be false is if the zone == .
@@ -60,25 +54,20 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 		// Verify RRSIGs from the message passed in using the KSK keys
 		err = verifyRRSIG(r, keyMap)
 		if err != nil {
-			return log, err
+			return nil, log, nil, err
 		}
 		// Make sure the parent DS record matches one of the KSK DNSKEYS
 		err = checkDS(keyMap, parentDSSet)
 		if err != nil {
-			return log, err
+			return nil, log, nil, err
 		}
 	}
 
-	log.DNSSECValid = true
-
-	// Only add response to cache if it wasn't a cache hit
-	if !log.CacheHit {
-		if rr.cache != nil {
-			go rr.cache.Add(q, &Answer{r.Answer, r.Ns, r.Extra, dns.RcodeSuccess, true}, false)
-		}
+	addCache := func() {
+		rr.cache.Add(q, &Answer{r.Answer, r.Ns, r.Extra, dns.RcodeSuccess, true}, false)
 	}
 
-	return log, nil
+	return keyMap, log, addCache, nil
 }
 
 func checkDS(keyMap map[uint16]*dns.DNSKEY, parentDSSet []dns.RR) error {
@@ -132,4 +121,29 @@ func verifyRRSIG(msg *dns.Msg, keyMap map[uint16]*dns.DNSKEY) error {
 		}
 	}
 	return nil
+}
+
+func (rr *RecursiveResolver) checkSignatures(ctx context.Context, m *dns.Msg, auth *Nameserver, parentDSSet []dns.RR) (*LookupLog, error) {
+	keyMap, log, addCache, err := rr.lookupDNSKEY(ctx, auth, parentDSSet)
+	if err != nil {
+		return log, err
+	}
+
+	// Verify DNSKEY RRSIG using the ZSK keys
+	err = verifyRRSIG(m, keyMap)
+	if err != nil {
+		return log, err
+	}
+
+	log.DNSSECValid = true
+
+	// Only add response to cache if it wasn't a cache hit
+	if !log.CacheHit {
+		if rr.cache != nil {
+			addCache()
+			// go rr.cache.Add(q, &Answer{r.Answer, r.Ns, r.Extra, dns.RcodeSuccess, true}, false)
+		}
+	}
+
+	return log, nil
 }
