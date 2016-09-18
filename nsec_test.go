@@ -1,6 +1,7 @@
 package solvere
 
 import (
+	// "fmt"
 	"strings"
 	"testing"
 
@@ -29,102 +30,146 @@ func makeNSEC3(name, next string, optOut bool, types []uint16) *dns.NSEC3 {
 	}
 }
 
-func zoneToRecords(z string) ([]dns.RR, error) {
+func zoneToRecords(t *testing.T, z string) []dns.RR {
 	records := []dns.RR{}
 	tokens := dns.ParseZone(strings.NewReader(z), "", "")
 	for x := range tokens {
 		if x.Error != nil {
-			return nil, x.Error
+			t.Fatalf("Failed to parse test records: %s", x.Error)
 		}
 		records = append(records, x.RR)
 	}
-	return records, nil
+	return records
 }
 
-// BUG(roland): Currently all these NSEC3 records are taken from real life queries, instead
-//              they should really be strictly generated... mainly cuz I can't find many
-//              zones implementing half of this trash
-
 func TestVerifyNameError(t *testing.T) {
-	err := verifyNameError(&Question{Name: "easdasdd1q2e2d2w.org.", Type: dns.TypeA}, []dns.RR{})
-	if err == nil {
-		t.Fatalf("NSEC3 verification didn't fail with an empty NSEC3 set")
+	// Valid name error
+	records := []dns.RR{
+		makeNSEC3("example.com.", "", false, nil),
 	}
-
-	records, err := zoneToRecords(`h9p7u7tr2u91d0v0ljs9l1gidnp90u3h.org. 86400 IN NSEC3 1 1 1 D399EAAB H9PARR669T6U8O1GSG9E1LMITK4DEM0T NS SOA RRSIG DNSKEY NSEC3PARAM
-7787tb18r44mr7o4pqc3n8ur0h2043tl.org. 86400 IN NSEC3 1 1 1 D399EAAB 778KI18543GPI8BANNL5TLE6A49ALNT4 NS DS RRSIG
-vaittv1g2ies9s3920soaumh73klnhs5.org. 86400 IN NSEC3 1 1 1 D399EAAB VAJSHJ9G9U88NEFMNIS1LOG48CM6L9LO NS DS RRSIG`)
+	err := verifyNameError(&Question{Name: "a.example.com.", Type: dns.TypeA}, records)
 	if err != nil {
-		t.Fatalf("Failed to parse NSEC3 test records: %s", err)
+		t.Fatalf("verifyNameError failed for valid name error response: %s", err)
 	}
 
-	err = verifyNameError(&Question{Name: "easdasdd1q2e2d2w.org.", Type: dns.TypeA}, records)
+	// Invalid name error, no CE
+	records = []dns.RR{
+		makeNSEC3("org.", "", false, nil),
+	}
+	err = verifyNameError(&Question{Name: "a.example.com.", Type: dns.TypeA}, records)
+	if err == nil {
+		t.Fatalf("verifyNameError didn't fail for invalid name error response without CE")
+	}
+
+	// Invalid name error, no source of synthesis coverer
+	records = []dns.RR{
+		makeNSEC3("com.", "", false, nil),
+	}
+	err = verifyNameError(&Question{Name: "a.example.com.", Type: dns.TypeA}, records)
+	if err == nil {
+		t.Fatalf("verifyNameError didn't fail for invalid name error response without source of synthesis coverer")
+	}
+
+	// RFC5155 Appendix B.1 example
+	records = zoneToRecords(t, `0p9mhaveqvm6t7vbl5lop2u3t2rp3tom.example. 3600 IN NSEC3 1 1 12 aabbccdd 2t7b4g4vsa5smi47k61mv5bv1a22bojr MX DNSKEY NS SOA NSEC3PARAM RRSIG
+b4um86eghhds6nea196smvmlo4ors995.example. 3600 IN NSEC3 1 1 12 aabbccdd gjeqe526plbf1g8mklp59enfd789njgi MX RRSIG
+35mthgpgcu1qg68fab165klnsnk3dpvl.example. 3600 IN NSEC3 1 1 12 aabbccdd b4um86eghhds6nea196smvmlo4ors995 NS DS RRSIG`)
+	err = verifyNameError(&Question{Name: "a.c.x.w.example.", Type: dns.TypeA}, records)
 	if err != nil {
-		t.Fatalf("NSEC3 verification failed: %s", err)
-	}
-
-	records, err = zoneToRecords(`h9p7u7tr2u91d0v0ljs9l1gidnp90u3h.org. 86400 IN NSEC3 1 1 1 D399EAAB H9PARR669T6U8O1GSG9E1LMITK4DEM0T NS SOA RRSIG DNSKEY NSEC3PARAM
-7787tb18r44mr7o4pqc3n8ur0h2043tl.org. 86400 IN NSEC3 1 1 1 D399EAAB 778KI18543GPI8BANNL5TLE6A49ALNT4 NS DS RRSIG`)
-	if err != nil {
-		t.Fatalf("Failed to parse NSEC3 test records: %s", err)
-	}
-
-	err = verifyNameError(&Question{Name: "easdasdd1q2e2d2w.org.", Type: dns.TypeA}, records)
-	if err == nil {
-		t.Fatal("NSEC3 verification did not fail")
-	}
-
-	err = verifyNameError(&Question{Name: "xxxx.org.", Type: dns.TypeA}, records)
-	if err == nil {
-		t.Fatal("NSEC3 verification didn't fail")
-	}
-
-	err = verifyNameError(&Question{Name: "different-parent.com.", Type: dns.TypeA}, records)
-	if err == nil {
-		t.Fatal("NSEC3 verification didn't fail")
+		t.Fatalf("verifyNameError failed with RFC5155 Appendix B.1 example: %s", err)
 	}
 }
 
 func TestVerifyNODATA(t *testing.T) {
-	records, err := zoneToRecords(`lg1c6bf6hv6ooib05ir8kolkofua0upg.whitehouse.gov. 3600 IN NSEC3 1 0 1 67C6697351FF4AEC LK8T7NFS811HQPP3UDU7A6KQ12IIOTKF A NS SOA MX TXT AAAA RRSIG DNSKEY NSEC3PARAM`)
+	// Valid NODATA
+	records := []dns.RR{
+		makeNSEC3("example.com.", "", false, nil),
+	}
+	err := verifyNODATA(&Question{Name: "example.com.", Type: dns.TypeA}, records)
 	if err != nil {
-		t.Fatalf("Failed to parse NSEC3 test records: %s", err)
+		t.Fatalf("verifyNODATA failed for valid NODATA: %s", err)
 	}
 
-	err = verifyNODATA(&Question{Name: "whitehouse.gov.", Type: dns.TypeCAA}, records)
-	if err != nil {
-		t.Fatalf("NSEC3 verification failed: %s", err)
+	// Invalid NODATA, question type bit set
+	records = []dns.RR{
+		makeNSEC3("example.com.", "", false, []uint16{dns.TypeA}),
 	}
-
-	err = verifyNODATA(&Question{Name: "mighthouse.gov.", Type: dns.TypeCAA}, records)
+	err = verifyNODATA(&Question{Name: "example.com.", Type: dns.TypeA}, records)
 	if err == nil {
-		t.Fatal("NSEC3 verification didn't fail")
+		t.Fatal("verifyNODATA didn't fail for invalid NODATA with question type bit set")
 	}
 
-	records, err = zoneToRecords(`lg1c6bf6hv6ooib05ir8kolkofua0upg.whitehouse.gov. 3600 IN NSEC3 1 0 1 67C6697351FF4AEC LK8T7NFS811HQPP3UDU7A6KQ12IIOTKF A NS SOA MX TXT AAAA RRSIG DNSKEY NSEC3PARAM CAA`)
-	if err != nil {
-		t.Fatalf("Failed to parse NSEC3 test records: %s", err)
+	// Invalid NODATA, CNAME bit set
+	records = []dns.RR{
+		makeNSEC3("example.com.", "", false, []uint16{dns.TypeCNAME}),
 	}
-
-	err = verifyNODATA(&Question{Name: "whitehouse.gov.", Type: dns.TypeCAA}, records)
+	err = verifyNODATA(&Question{Name: "example.com.", Type: dns.TypeA}, records)
 	if err == nil {
-		t.Fatal("NSEC3 verification didn't fail")
+		t.Fatal("verifyNODATA didn't fail for invalid NODATA with CNAME bit set")
 	}
 
-	records, err = zoneToRecords(`lg1c6bf6hv6ooib05ir8kolkofua0upg.whitehouse.gov. 3600 IN NSEC3 1 0 1 67C6697351FF4AEC LK8T7NFS811HQPP3UDU7A6KQ12IIOTKF A NS SOA MX TXT AAAA RRSIG DNSKEY NSEC3PARAM`)
+	// Valid NODATA, no matching record but covered NC
+	records = []dns.RR{
+		makeNSEC3("example.com.", "", true, nil),
+	}
+	err = verifyNODATA(&Question{Name: "a.example.com.", Type: dns.TypeDS}, records)
 	if err != nil {
-		t.Fatalf("Failed to parse NSEC3 test records: %s", err)
+		t.Fatalf("verifyNODATA failed for valid NODATA with covered NC: %s", err)
 	}
 
-	err = verifyNODATA(&Question{Name: "whitehouse.gov.", Type: dns.TypeDS}, records)
+	// Invalid NODATA, no matching record but covered NC with non-DS question type
+	records = []dns.RR{
+		makeNSEC3("example.com.", "", false, nil),
+	}
+	err = verifyNODATA(&Question{Name: "a.example.com.", Type: dns.TypeA}, records)
+	if err == nil {
+		t.Fatalf("verifyNODATA didn't fail for invalid NODATA with covered NC with non-DS question type")
+	}
+
+	// Invalid NODATA, no matching record or covered NC
+	records = []dns.RR{
+		makeNSEC3("com.", "", false, nil),
+	}
+	err = verifyNODATA(&Question{Name: "a.example.com.", Type: dns.TypeDS}, records)
+	if err == nil {
+		t.Fatalf("verifyNODATA didn't fail for invalid NODATA without covered NC")
+	}
+
+	// Invalid NODATA, no matching record or CE
+	records = []dns.RR{
+		makeNSEC3("org.", "", false, nil),
+	}
+	err = verifyNODATA(&Question{Name: "example.com.", Type: dns.TypeDS}, records)
+	if err == nil {
+		t.Fatalf("verifyNODATA didn't fail for invalid NODATA without CE")
+	}
+
+	// Invalid NODATA, no matching record but covered NC without opt-out set
+	records = []dns.RR{
+		makeNSEC3("example.com.", "", false, nil),
+	}
+	err = verifyNODATA(&Question{Name: "a.example.com.", Type: dns.TypeDS}, records)
+	if err == nil {
+		t.Fatalf("verifyNODATA didn't fail for invalid NODATA with covered NC without opt-out set")
+	}
+
+	// RFC5155 Appendix B.2 example
+	records = zoneToRecords(t, `2t7b4g4vsa5smi47k61mv5bv1a22bojr.example. 3600 IN NSEC3 1 1 12 aabbccdd 2vptu5timamqttgl4luu9kg21e0aor3s A RRSIG`)
+	err = verifyNODATA(&Question{Name: "ns1.example.", Type: dns.TypeMX}, records)
 	if err != nil {
-		t.Fatalf("verifyNODATA failed: %s", err)
+		t.Fatalf("verifyNODATA failed with RFC5155 Appendix B.2 example: %s", err)
+	}
+
+	// RFC5155 Appendix B.2.1 example
+	records = zoneToRecords(t, `ji6neoaepv8b5o6k4ev33abha8ht9fgc.example. 3600 IN NSEC3 1 1 12 aabbccdd k8udemvp1j2f7eg6jebps17vp3n8i58h`)
+	err = verifyNODATA(&Question{Name: "y.w.example.", Type: dns.TypeA}, records)
+	if err != nil {
+		t.Fatalf("verifyNODATA failed with RFC5155 Appendix B.2.1 example: %s", err)
 	}
 }
 
-func TestVerifyWildcardAnswer(t *testing.T) {
-
-}
+// func TestVerifyWildcardAnswer(t *testing.T) {
+// }
 
 func TestVerifyDelegation(t *testing.T) {
 	// Valid direct delegation
@@ -192,12 +237,16 @@ func TestVerifyDelegation(t *testing.T) {
 		t.Fatal("verifyDelegation didn't fail for a direct delegation with Opt-Out bit not set on NC")
 	}
 
-	// RFC5155 Appendix B.3 example
-	records, err = zoneToRecords(`35mthgpgcu1qg68fab165klnsnk3dpvl.example. 3600 IN NSEC3 1 1 12 aabbccdd b4um86eghhds6nea196smvmlo4ors995 NS DS RRSIG
-0p9mhaveqvm6t7vbl5lop2u3t2rp3tom.example. 3600 IN NSEC3 1 1 12 aabbccdd 2t7b4g4vsa5smi47k61mv5bv1a22bojr MX DNSKEY NS SOA NSEC3PARAM RRSIG`)
-	if err != nil {
-		t.Fatalf("Failed to parse NSEC3 test records: %s", err)
+	// Invalid Opt-Out delegation, empty NSEC3 set
+	records = []dns.RR{}
+	err = verifyDelegation("b.com.", records)
+	if err == nil {
+		t.Fatal("verifyDelegation didn't fail for a direct delegation with empty NSEC3 set")
 	}
+
+	// RFC5155 Appendix B.3 example
+	records = zoneToRecords(t, `35mthgpgcu1qg68fab165klnsnk3dpvl.example. 3600 IN NSEC3 1 1 12 aabbccdd b4um86eghhds6nea196smvmlo4ors995 NS DS RRSIG
+0p9mhaveqvm6t7vbl5lop2u3t2rp3tom.example. 3600 IN NSEC3 1 1 12 aabbccdd 2t7b4g4vsa5smi47k61mv5bv1a22bojr MX DNSKEY NS SOA NSEC3PARAM RRSIG`)
 	err = verifyDelegation("c.example.", records)
 	if err != nil {
 		t.Fatalf("verifyDelegation failed wtih opt out delegation example from RFC5155: %s", err)

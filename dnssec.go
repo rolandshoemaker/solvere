@@ -39,10 +39,6 @@ func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *
 		if a.Header().Rrtype == dns.TypeDNSKEY {
 			dnskey := a.(*dns.DNSKEY)
 			tag := dnskey.KeyTag()
-			// FUN STORY: some people don't respect what key types are supposed to mean
-			// and as such they sometimes use a KSK to sign the zone or a ZSK to sign
-			// a key. This means we can't do the nice thing of splitting keys by type
-			// and must just stick them all in one map.
 			if dnskey.Flags == 256 || dnskey.Flags == 257 {
 				keyMap[tag] = dnskey
 			}

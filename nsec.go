@@ -3,7 +3,7 @@ package solvere
 import (
 	"errors"
 	"fmt"
-	"strings"
+	// "strings"
 
 	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
@@ -15,6 +15,7 @@ var (
 	ErrNSECMissingCoverage  = errors.New("solvere: NSEC3 record missing for expected encloser")
 	ErrNSECBadDelegation    = errors.New("solvere: DS or SOA bit set in NSEC3 type map")
 	ErrNSECNSMissing        = errors.New("solvere: NS bit not set in NSEC3 type map")
+	ErrNSECOptOut           = errors.New("solvere: Opt-Out bit not set for NSEC3 record covering next closer")
 )
 
 func typesSet(set []uint16, types ...uint16) bool {
@@ -30,32 +31,22 @@ func typesSet(set []uint16, types ...uint16) bool {
 	return false
 }
 
-// findClosestEncloser finds the Closest Encloser and Next Closer names for a name
+// findClosestEncloser finds the Closest Encloser and Next Closers for a name
 // in a set of NSEC3 records
 func findClosestEncloser(name string, nsec []dns.RR) (string, string) {
 	// RFC 5155 Section 8.3 (ish)
 	labelIndices := dns.Split(name)
-	ce, nc := "", ""
+	nc := name
 	for i := 0; i < len(labelIndices); i++ {
 		z := name[labelIndices[i]:]
-		for _, rr := range nsec {
-			n := rr.(*dns.NSEC3)
-			if n.Match(z) {
-				ce = z
-				if i == 0 {
-					nc = name
-				} else {
-					nc = name[labelIndices[i-1]:]
-				}
-				for _, r := range nsec {
-					n = r.(*dns.NSEC3)
-					if n.Cover(nc) {
-						return ce, nc
-					}
-				}
-				return "", ""
-			}
+		_, err := findMatching(z, nsec)
+		if err != nil {
+			continue
 		}
+		if i != 0 {
+			nc = name[labelIndices[i-1]:]
+		}
+		return z, nc
 	}
 	return "", ""
 }
@@ -93,7 +84,7 @@ func verifyNameError(q *Question, nsec []dns.RR) error {
 	return nil
 }
 
-// verifyNSECNODATA verifies NSEC/NSEC3 records from a answer with a NOERROR (0) RCODE
+// verifyNODATA verifies NSEC/NSEC3 records from a answer with a NOERROR (0) RCODE
 // and a empty Answer section
 func verifyNODATA(q *Question, nsec []dns.RR) error {
 	// RFC5155 Section 8.5
@@ -108,11 +99,13 @@ func verifyNODATA(q *Question, nsec []dns.RR) error {
 		if ce == "" {
 			return ErrNSECMissingCoverage
 		}
-		_, _, err = findCoverer(nc, nsec)
+		_, optOut, err := findCoverer(nc, nsec)
 		if err != nil {
 			return err
 		}
-		// BUG(roland): this needs to check the opt out bit
+		if !optOut {
+			return ErrNSECOptOut
+		}
 		return nil
 	}
 
@@ -120,26 +113,26 @@ func verifyNODATA(q *Question, nsec []dns.RR) error {
 		return ErrNSECTypeExists
 	}
 	// BUG(roland): pretty sure this is 100% incorrect, should prob be its own method...
-	if strings.HasPrefix(q.Name, "*.") {
-		// RFC 5155 Section 8.7
-		ce, _ := findClosestEncloser(q.Name, nsec)
-		if ce == "" {
-			return ErrNSECMissingCoverage
-		}
-		matchTypes, err := findMatching(fmt.Sprintf("*.%s", ce), nsec)
-		if err != nil {
-			return err
-		}
-		if typesSet(matchTypes, q.Type, dns.TypeCNAME) {
-			return ErrNSECTypeExists
-		}
-	}
+	// if strings.HasPrefix(q.Name, "*.") {
+	// 	// RFC 5155 Section 8.7
+	// 	ce, _ := findClosestEncloser(q.Name, nsec)
+	// 	if ce == "" {
+	// 		return ErrNSECMissingCoverage
+	// 	}
+	// 	matchTypes, err := findMatching(fmt.Sprintf("*.%s", ce), nsec)
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	if typesSet(matchTypes, q.Type, dns.TypeCNAME) {
+	// 		return ErrNSECTypeExists
+	// 	}
+	// }
 	return nil
 }
 
 // RFC 5155 Section 8.8
-func verifyWildcardAnswer() {
-}
+// func verifyWildcardAnswer() {
+// }
 
 // RFC 5155 Section 8.9
 func verifyDelegation(delegation string, nsec []dns.RR) error {
@@ -154,7 +147,7 @@ func verifyDelegation(delegation string, nsec []dns.RR) error {
 			return err
 		}
 		if !optOut {
-			return errors.New("solvere: Opt-Out bit not set for NSEC3 record covering next closer")
+			return ErrNSECOptOut
 		}
 		return nil
 	}
