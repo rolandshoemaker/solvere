@@ -23,13 +23,34 @@ var (
 
 func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver) (map[uint16]*dns.DNSKEY, *LookupLog, func(), error) {
 	q := &Question{Name: auth.Zone, Type: dns.TypeDNSKEY}
-	r, log, err := rr.query(ctx, q, auth)
-	if err != nil {
-		return nil, log, nil, err
-	}
+	var r *dns.Msg
+	var log *LookupLog
+	var err error
+	if rr.cache != nil {
 
-	if len(r.Answer) == 0 || r.Rcode != dns.RcodeSuccess {
-		return nil, log, nil, ErrNoDNSKEY
+	}
+	if rr.cache != nil {
+		if a := rr.cache.Get(q); a != nil {
+			r = new(dns.Msg)
+			r.Rcode = dns.RcodeSuccess
+			r.Answer = a.Answer
+			r.Ns = a.Authority
+			r.Extra = a.Additional
+			log = newLookupLog(q, nil)
+			log.CacheHit = true
+			log.DNSSECValid = a.Authenticated
+			log.Rcode = dns.RcodeSuccess
+		}
+	}
+	if r == nil {
+		r, log, err = rr.query(ctx, q, auth)
+		if err != nil {
+			return nil, log, nil, err
+		}
+
+		if len(r.Answer) == 0 || r.Rcode != dns.RcodeSuccess {
+			return nil, log, nil, ErrNoDNSKEY
+		}
 	}
 
 	keyMap := make(map[uint16]*dns.DNSKEY)
@@ -38,7 +59,6 @@ func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver)
 		if a.Header().Rrtype == dns.TypeDNSKEY {
 			dnskey := a.(*dns.DNSKEY)
 			tag := dnskey.KeyTag()
-			// fmt.Println("hi", tag)
 			if dnskey.Flags == 256 || dnskey.Flags == 257 {
 				keyMap[tag] = dnskey
 			}
@@ -50,7 +70,6 @@ func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver)
 	}
 
 	// Verify RRSIGs from the message passed in using the KSK keys
-	// fmt.Println("Here...")
 	if auth.Zone != "." {
 		err = verifyRRSIG(r, keyMap)
 		if err != nil {
@@ -59,7 +78,7 @@ func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver)
 	}
 
 	addCache := func() {
-		if rr.cache != nil {
+		if rr.cache != nil && !log.CacheHit {
 			rr.cache.Add(q, &Answer{r.Answer, r.Ns, r.Extra, dns.RcodeSuccess, true}, false)
 		}
 	}

@@ -3,18 +3,23 @@ package solvere
 import (
 	"crypto"
 	"crypto/rsa"
+	"crypto/sha1"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 
+	"github.com/jmhodges/clock"
 	"golang.org/x/net/context"
 )
 
+var eMu = new(sync.Mutex)
+
 var exampleKey = dns.DNSKEY{
-	Hdr:       dns.RR_Header{Name: "example.", Rrtype: dns.TypeDNSKEY},
+	Hdr:       dns.RR_Header{Name: "example.", Rrtype: dns.TypeDNSKEY, Ttl: 3600},
 	Algorithm: dns.RSASHA256,
 	Flags:     256,
 	Protocol:  3,
@@ -44,6 +49,7 @@ func init() {
 	expiration := uint32(n - (mod * year68))
 
 	exampleKeySig = &dns.RRSIG{
+		Hdr:        dns.RR_Header{Ttl: 3600},
 		Inception:  inception,
 		Expiration: expiration,
 		KeyTag:     exampleKey.KeyTag(),
@@ -67,6 +73,8 @@ func mockDNSKEYServer(w dns.ResponseWriter, r *dns.Msg) {
 		w.WriteMsg(m)
 		return
 	}
+	eMu.Lock()
+	defer eMu.Unlock()
 	switch r.Question[0].Name {
 	case "example.":
 		m.Answer = append(m.Answer, &exampleKey, exampleKeySig)
@@ -130,7 +138,7 @@ func TestLookupDNSKEY(t *testing.T) {
 	auth := &Nameserver{Zone: "example.", Addr: "127.0.0.1"}
 
 	// Valid response
-	keyMap, _, _, err := rr.lookupDNSKEY(context.Background(), auth)
+	keyMap, _, addToCache, err := rr.lookupDNSKEY(context.Background(), auth)
 	if err != nil {
 		t.Fatalf("lookupDNSKEY failed with a valid response with no DS set: %s", err)
 	}
@@ -142,6 +150,8 @@ func TestLookupDNSKEY(t *testing.T) {
 	} else if *k != exampleKey {
 		t.Fatal("lookupDNSKEY returned keyMap containing wrong key with right key tag for 'example.'")
 	}
+	// nothing should happen since cache == nil
+	addToCache()
 
 	// Invalid response, empty answer
 	_, _, _, err = rr.lookupDNSKEY(context.Background(), &Nameserver{Zone: ".", Addr: "127.0.0.1"})
@@ -177,6 +187,30 @@ func TestLookupDNSKEY(t *testing.T) {
 	_, _, _, err = rr.lookupDNSKEY(context.Background(), &Nameserver{Zone: "bad-sig.", Addr: "127.0.0.1"})
 	if err == nil {
 		t.Fatalf("lookupDNSKEY didn't fail with bad signature")
+	}
+
+	// Cache test
+	fc := clock.NewFake()
+	cache := &BasicCache{cache: make(map[[sha1.Size]byte]*cacheEntry), clk: fc}
+	rr.cache = cache
+
+	_, _, addToCache, err = rr.lookupDNSKEY(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("lookupDNSKEY failed with a valid response: %s", err)
+	}
+	addToCache()
+
+	// check key is cached
+	goodSig := exampleKeySig.Signature
+	eMu.Lock()
+	exampleKeySig.Signature = ""
+	eMu.Unlock()
+	_, _, _, err = rr.lookupDNSKEY(context.Background(), auth)
+	eMu.Lock()
+	exampleKeySig.Signature = goodSig
+	eMu.Unlock()
+	if err != nil {
+		t.Fatalf("lookupDNSKEY failed with a valid response: %s", err)
 	}
 }
 
