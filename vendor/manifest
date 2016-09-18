@@ -2,6 +2,14 @@
 	"version": 0,
 	"dependencies": [
 		{
+			"importpath": "github.com/jmhodges/clock",
+			"repository": "https://github.com/jmhodges/clock",
+			"vcs": "git",
+			"revision": "880ee4c335489bc78d01e4d0a254ae880734bc15",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/miekg/dns",
 			"repository": "https://github.com/miekg/dns",
 			"vcs": "git",
