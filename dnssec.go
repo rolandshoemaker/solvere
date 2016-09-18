@@ -17,20 +17,19 @@ var (
 	ErrNoSignatures           = errors.New("solvere: No RRSIG records for zone that should be signed")
 	ErrMissingDNSKEY          = errors.New("solvere: No matching DNSKEY found for RRSIG records")
 	ErrInvalidSignaturePeriod = errors.New("solvere: Incorrect signature validity period")
-	ErrBadAnswer              = errors.New("solvere: Query response returned a non-zero RCODE")
+	ErrBadAnswer              = errors.New("solvere: Response contained a non-zero RCODE")
+	ErrMissingSigned          = errors.New("solvere: Signed records are missing")
 )
 
-func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver, parentDSSet []dns.RR) (map[uint16]*dns.DNSKEY, *LookupLog, func(), error) {
+func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver) (map[uint16]*dns.DNSKEY, *LookupLog, func(), error) {
 	q := &Question{Name: auth.Zone, Type: dns.TypeDNSKEY}
 	r, log, err := rr.query(ctx, q, auth)
 	if err != nil {
 		return nil, log, nil, err
 	}
 
-	if len(r.Answer) == 0 {
+	if len(r.Answer) == 0 || r.Rcode != dns.RcodeSuccess {
 		return nil, log, nil, ErrNoDNSKEY
-	} else if r.Rcode != dns.RcodeSuccess {
-		return nil, log, nil, ErrBadAnswer
 	}
 
 	keyMap := make(map[uint16]*dns.DNSKEY)
@@ -39,6 +38,7 @@ func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver,
 		if a.Header().Rrtype == dns.TypeDNSKEY {
 			dnskey := a.(*dns.DNSKEY)
 			tag := dnskey.KeyTag()
+			// fmt.Println("hi", tag)
 			if dnskey.Flags == 256 || dnskey.Flags == 257 {
 				keyMap[tag] = dnskey
 			}
@@ -49,22 +49,19 @@ func (rr *RecursiveResolver) lookupDNSKEY(ctx context.Context, auth *Nameserver,
 		return nil, log, nil, ErrNoDNSKEY // ???
 	}
 
-	// The only time this should be false is if the zone == .
-	if len(parentDSSet) > 0 {
-		// Verify RRSIGs from the message passed in using the KSK keys
+	// Verify RRSIGs from the message passed in using the KSK keys
+	// fmt.Println("Here...")
+	if auth.Zone != "." {
 		err = verifyRRSIG(r, keyMap)
-		if err != nil {
-			return nil, log, nil, err
-		}
-		// Make sure the parent DS record matches one of the KSK DNSKEYS
-		err = checkDS(keyMap, parentDSSet)
 		if err != nil {
 			return nil, log, nil, err
 		}
 	}
 
 	addCache := func() {
-		rr.cache.Add(q, &Answer{r.Answer, r.Ns, r.Extra, dns.RcodeSuccess, true}, false)
+		if rr.cache != nil {
+			rr.cache.Add(q, &Answer{r.Answer, r.Ns, r.Extra, dns.RcodeSuccess, true}, false)
+		}
 	}
 
 	return keyMap, log, addCache, nil
@@ -105,7 +102,7 @@ func verifyRRSIG(msg *dns.Msg, keyMap map[uint16]*dns.DNSKEY) error {
 			sig := sigRR.(*dns.RRSIG)
 			rest := extractRRSet(section, sig.Header().Name, sig.TypeCovered)
 			if len(rest) == 0 {
-				return errors.New("solvere: Records missing for signature")
+				return ErrMissingSigned
 			}
 			k, present := keyMap[sig.KeyTag]
 			if !present {
@@ -124,12 +121,18 @@ func verifyRRSIG(msg *dns.Msg, keyMap map[uint16]*dns.DNSKEY) error {
 }
 
 func (rr *RecursiveResolver) checkSignatures(ctx context.Context, m *dns.Msg, auth *Nameserver, parentDSSet []dns.RR) (*LookupLog, error) {
-	keyMap, log, addCache, err := rr.lookupDNSKEY(ctx, auth, parentDSSet)
+	keyMap, log, addCache, err := rr.lookupDNSKEY(ctx, auth)
 	if err != nil {
 		return log, err
 	}
 
-	// Verify DNSKEY RRSIG using the ZSK keys
+	if len(parentDSSet) > 0 {
+		err = checkDS(keyMap, parentDSSet)
+		if err != nil {
+			return log, err
+		}
+	}
+
 	err = verifyRRSIG(m, keyMap)
 	if err != nil {
 		return log, err

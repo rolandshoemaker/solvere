@@ -44,6 +44,7 @@ var (
 	ErrTooManyReferrals   = errors.New("solvere: Too many referrals")
 	ErrNoNSAuthorties     = errors.New("solvere: No NS authority records found")
 	ErrNoAuthorityAddress = errors.New("solvere: No A/AAAA records found for the chosen authority")
+	ErrOutOfBailiwick     = errors.New("Out of bailiwick record in message")
 )
 
 // Question represents a DNS IN question
@@ -164,7 +165,7 @@ func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Names
 	for _, section := range [][]dns.RR{r.Answer, r.Ns} {
 		for _, record := range section {
 			if record.Header().Rrtype != dns.TypeOPT && !strings.HasSuffix(record.Header().Name, auth.Zone) {
-				return nil, ql, errors.New("Out of bailiwick record in message") // or just strip invalid records...?
+				return nil, ql, ErrOutOfBailiwick // or just strip invalid records...?
 			}
 		}
 	}
@@ -172,7 +173,6 @@ func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Names
 }
 
 func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*Nameserver, *LookupLog, error) {
-	// BUG(roland): LookupLog for lookupNS calls isn't included in parent chain
 	// BUG(roland): There is no maximum depth to Lookup -> lookupNS -> Lookup calls, looping is possible
 	// BUG(roland): I'm not sure how the lookup of a NS addr should be taken into account in terms of the
 	//              dnssec chain
