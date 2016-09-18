@@ -166,7 +166,7 @@ func TestVerifyDelegation(t *testing.T) {
 	// Valid Opt-Out delegation
 	records = []dns.RR{
 		makeNSEC3("com.", "a.com.", false, []uint16{dns.TypeNS}),  // CE
-		makeNSEC3("a.com.", "e.com.", true, []uint16{dns.TypeNS}), // NC coverer
+		makeNSEC3("a.com.", "e.com.", true, []uint16{dns.TypeNS}), // NC coverer, e.com is a lucky hash, thats not how ordering works
 	}
 	err = verifyDelegation("b.com.", records)
 	if err != nil {
@@ -175,7 +175,7 @@ func TestVerifyDelegation(t *testing.T) {
 
 	// Invalid Opt-Out delegation, no NC
 	records = []dns.RR{
-		makeNSEC3("com.", "a.com.", false, []uint16{dns.TypeNS}), // CE
+		makeNSEC3("com.", "a.com.", false, []uint16{dns.TypeNS}),
 	}
 	err = verifyDelegation("b.com.", records)
 	if err == nil {
@@ -184,15 +184,15 @@ func TestVerifyDelegation(t *testing.T) {
 
 	// Invalid Opt-Out delegation, opt-out bit not set on NC
 	records = []dns.RR{
-		makeNSEC3("com.", "a.com.", false, []uint16{dns.TypeNS}),   // CE
-		makeNSEC3("a.com.", "e.com.", false, []uint16{dns.TypeNS}), // NC coverer
+		makeNSEC3("com.", "a.com.", false, []uint16{dns.TypeNS}),
+		makeNSEC3("a.com.", "e.com.", false, []uint16{dns.TypeNS}),
 	}
 	err = verifyDelegation("b.com.", records)
 	if err == nil {
 		t.Fatal("verifyDelegation didn't fail for a direct delegation with Opt-Out bit not set on NC")
 	}
 
-	// RFC5155 Appendix B.3
+	// RFC5155 Appendix B.3 example
 	records, err = zoneToRecords(`35mthgpgcu1qg68fab165klnsnk3dpvl.example. 3600 IN NSEC3 1 1 12 aabbccdd b4um86eghhds6nea196smvmlo4ors995 NS DS RRSIG
 0p9mhaveqvm6t7vbl5lop2u3t2rp3tom.example. 3600 IN NSEC3 1 1 12 aabbccdd 2t7b4g4vsa5smi47k61mv5bv1a22bojr MX DNSKEY NS SOA NSEC3PARAM RRSIG`)
 	if err != nil {
