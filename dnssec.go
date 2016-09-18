@@ -105,7 +105,7 @@ func verifyRRSIG(msg *dns.Msg, keyMap map[uint16]*dns.DNSKEY) error {
 			sig := sigRR.(*dns.RRSIG)
 			rest := extractRRSet(section, sig.Header().Name, sig.TypeCovered)
 			if len(rest) == 0 {
-				return errors.New("Records missing for signature")
+				return errors.New("solvere: Records missing for signature")
 			}
 			k, present := keyMap[sig.KeyTag]
 			if !present {

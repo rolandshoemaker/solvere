@@ -9,7 +9,7 @@ import (
 	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
 )
 
-func TestCheckDNSKEY(t *testing.T) {
+func TestCheckSignatures(t *testing.T) {
 
 }
 
@@ -105,10 +105,51 @@ func TestVerifyRRSIG(t *testing.T) {
 		t.Fatalf("Failed to sign aSet: %s", err)
 	}
 
-	m := &dns.Msg{Answer: append(nsSet, sigB), Ns: append(aSet, sigA)}
-
+	// Valid signatures
+	m := &dns.Msg{Answer: append(nsSet, sigB)}
 	err = verifyRRSIG(m, keyMap)
 	if err != nil {
 		t.Fatalf("Failed to verify valid RRSIGs: %s", err)
+	}
+
+	// Missing signatures
+	m = &dns.Msg{Answer: aSet}
+	err = verifyRRSIG(m, keyMap)
+	if err == nil {
+		t.Fatal("verifyRRSIG didn't fail with missing signatures")
+	}
+
+	// Missing signed records
+	m = &dns.Msg{Answer: []dns.RR{sigA}}
+	err = verifyRRSIG(m, keyMap)
+	if err == nil {
+		t.Fatal("verifyRRSIG didn't fail with missing signed records")
+	}
+
+	// Missing key
+	m = &dns.Msg{Answer: append(aSet, sigA)}
+	err = verifyRRSIG(m, make(map[uint16]*dns.DNSKEY))
+	if err == nil {
+		t.Fatal("verifyRRSIG didn't fail with missing DNSKEY")
+	}
+
+	// Invalid signature
+	sigA.Signature = ""
+	m = &dns.Msg{Answer: append(aSet, sigA)}
+	err = verifyRRSIG(m, keyMap)
+	if err == nil {
+		t.Fatal("verifyRRSIG didn't fail with invalid signature")
+	}
+
+	// Invalid validity period
+	sigA.Expiration = inception - 10
+	err = sigA.Sign(rk, aSet)
+	if err != nil {
+		t.Fatalf("Failed to sign aSet: %s", err)
+	}
+	m = &dns.Msg{Answer: append(aSet, sigA)}
+	err = verifyRRSIG(m, keyMap)
+	if err == nil {
+		t.Fatal("verifyRRSIG didn't fail with invalid validity period")
 	}
 }
