@@ -1,11 +1,14 @@
 package solvere
 
 import (
+	"crypto/sha1"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
+
+	"github.com/jmhodges/clock"
 )
 
 func TestMinTTL(t *testing.T) {
@@ -24,7 +27,8 @@ func TestMinTTL(t *testing.T) {
 }
 
 func TestCache(t *testing.T) {
-	cache := NewBasicCache()
+	fc := clock.NewFake()
+	cache := &BasicCache{cache: make(map[[sha1.Size]byte]*cacheEntry), clk: fc}
 
 	q := Question{Name: "testing", Type: dns.TypeA}
 	ca := cache.Get(&q)
@@ -32,13 +36,14 @@ func TestCache(t *testing.T) {
 		t.Fatalf("Empty answer returned non-nil Answer: %#v", ca)
 	}
 
-	a := Answer{Answer: []dns.RR{&dns.A{Hdr: dns.RR_Header{Ttl: 1}, A: net.IP{1, 2, 3, 4}}}}
+	a := Answer{Answer: []dns.RR{&dns.A{Hdr: dns.RR_Header{Ttl: 5}, A: net.IP{1, 2, 3, 4}}}}
 	cache.Add(&q, &a, true)
 	ca = cache.Get(&q)
 	if ca != &a {
 		t.Fatalf("Cache returned incorrect answer: expected %#v, got %#v", a, ca)
 	}
-	time.Sleep(time.Second)
+	fc.Add(time.Second * 30)
+	cache.fullPrune()
 	ca = cache.Get(&q)
 	if ca == nil {
 		t.Fatal("Cache pruned q/a that should've been kept forever")
@@ -50,21 +55,22 @@ func TestCache(t *testing.T) {
 	if ca != &a {
 		t.Fatalf("Cache returned incorrect answer: expected %#v, got %#v", a, ca)
 	}
-	time.Sleep(time.Second * 2)
+	fc.Add(time.Second * 30)
+	cache.fullPrune()
 	ca = cache.Get(&q)
 	if ca != nil {
-		t.Fatal("Cache didn't prune q/a that had a minimum TTL of 1 second")
+		t.Fatal("Cache didn't prune q/a that had a minimum TTL of 5 seconds after 30 seconds")
 	}
 
-	// BUG(roland): Update test is super flaky...
 	na := Answer{Answer: []dns.RR{&dns.A{Hdr: dns.RR_Header{Ttl: 2}, A: net.IP{1, 2, 3, 5}}}}
-	cache.Add(&q, &na, false)
-	time.Sleep(time.Second)
 	cache.Add(&q, &a, false)
-	time.Sleep(time.Second * 2)
+	fc.Add(time.Second * 2)
+	cache.Add(&q, &na, false)
+	fc.Add(time.Second * 3)
+	cache.fullPrune()
 	ca = cache.Get(&q)
 	if ca != nil {
-		t.Fatal("Cache didn't prune q/a that had a minimum TTL of 1 second")
+		t.Fatal("Cache didn't prune q/a that had a minimum TTL of 2 second")
 	}
 
 	a = Answer{Answer: []dns.RR{&dns.A{Hdr: dns.RR_Header{}, A: net.IP{1, 2, 3, 4}}}}

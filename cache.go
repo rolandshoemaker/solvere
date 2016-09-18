@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
+
+	"github.com/jmhodges/clock"
 )
 
 func hashQuestion(q *Question) [sha1.Size]byte {
@@ -34,20 +36,26 @@ type cacheEntry struct {
 	answer   *Answer
 	ttl      int
 	modified time.Time
-	removed  bool
+	forever  bool
 	mu       sync.Mutex
 }
 
-func (ca *cacheEntry) update(entry *cacheEntry, answer *Answer, ttl int) {
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.removed {
-		return
-	}
+func (ce *cacheEntry) update(answer *Answer, ttl int, clk clock.Clock) {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
 	// just overwrite the previous one...
-	entry.answer = answer
-	entry.ttl = ttl
-	entry.modified = time.Now()
+	ce.answer = answer
+	ce.ttl = ttl
+	ce.modified = clk.Now()
+}
+
+func (ce *cacheEntry) expired(clk clock.Clock) bool {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+	if ce.forever {
+		return false
+	}
+	return clk.Now().After(ce.modified.Add(time.Second * time.Duration(ce.ttl)))
 }
 
 // QuestionAnswerCache is used to cache responses to queries. The internal implementation
@@ -61,41 +69,40 @@ type QuestionAnswerCache interface {
 type BasicCache struct {
 	mu    sync.RWMutex
 	cache map[[sha1.Size]byte]*cacheEntry
+	clk   clock.Clock
 }
+
+var defaultPruneInterval = time.Minute
 
 // NewBasicCache returns an initialized BasicCache
 func NewBasicCache() *BasicCache {
-	return &BasicCache{cache: make(map[[sha1.Size]byte]*cacheEntry)}
+	bc := &BasicCache{cache: make(map[[sha1.Size]byte]*cacheEntry), clk: clock.Default()}
+	go func() {
+		t := time.NewTicker(defaultPruneInterval)
+		for range t.C {
+			bc.fullPrune()
+		}
+	}()
+	return bc
 }
 
-func (bc *BasicCache) del(entry *cacheEntry, id [sha1.Size]byte) {
+func (bc *BasicCache) del(id [sha1.Size]byte) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 	delete(bc.cache, id)
-	entry.removed = true
 }
 
-func (bc *BasicCache) prune(q *Question, id [sha1.Size]byte, ttl int) {
-	sleep := time.Second * time.Duration(ttl)
-	for {
-		time.Sleep(sleep)
-		entry, present := bc.getEntry(q)
-		if !present {
-			return
+func (bc *BasicCache) fullPrune() {
+	ids := [][sha1.Size]byte{}
+	bc.mu.RLock()
+	for id, a := range bc.cache {
+		if a.expired(bc.clk) {
+			ids = append(ids, id)
 		}
-		entry.mu.Lock()
-		if entry.removed {
-			entry.mu.Unlock()
-			return
-		}
-		new := entry.modified.Add(time.Second * time.Duration(entry.ttl)).Sub(time.Now())
-		if new < 0 {
-			bc.del(entry, id)
-			entry.mu.Unlock()
-			return
-		}
-		entry.mu.Unlock()
-		sleep = new
+	}
+	bc.mu.RUnlock()
+	for _, id := range ids {
+		bc.del(id)
 	}
 }
 
@@ -106,27 +113,27 @@ func (bc *BasicCache) Add(q *Question, answer *Answer, forever bool) {
 	if !forever {
 		ttl = minTTL(append(answer.Answer, append(answer.Additional, answer.Authority...)...))
 		if ttl == 0 {
-			return
+			return // ???
 		}
 	}
 	// should filter out OPT records here
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
-	if entry, present := bc.cache[id]; present {
-		bc.cache[id].update(entry, answer, ttl)
+	if _, present := bc.cache[id]; present {
+		bc.cache[id].update(answer, ttl, bc.clk)
 		return
 	}
 	bc.cache[id] = &cacheEntry{
 		answer,
 		ttl,
-		time.Now(),
-		false,
+		bc.clk.Now(),
+		forever,
 		sync.Mutex{},
 	}
 	if forever {
 		return
 	}
-	go bc.prune(q, id, ttl)
+	// go bc.prune(q, id, ttl)
 }
 
 func (bc *BasicCache) getEntry(q *Question) (*cacheEntry, bool) {
@@ -142,9 +149,6 @@ func (bc *BasicCache) Get(q *Question) *Answer {
 	if entry, present := bc.getEntry(q); present {
 		entry.mu.Lock()
 		defer entry.mu.Unlock()
-		if entry.removed {
-			return nil
-		}
 		return entry.answer
 	}
 	return nil
