@@ -52,8 +52,8 @@ type Question struct {
 	Type uint16
 }
 
-// QueryLog describes a query to a upstream nameserver
-type QueryLog struct {
+// LookupLog describes how a resolution was performed
+type LookupLog struct {
 	Query       *Question
 	Rcode       int
 	CacheHit    bool `json:",omitempty"`
@@ -62,22 +62,19 @@ type QueryLog struct {
 	Error       string `json:",omitempty"`
 	Truncated   bool   `json:",omitempty"`
 	Referral    bool   `json:",omitempty"`
+	Started     time.Time
 
-	// Only present if CacheHit == false
 	NS *Nameserver `json:",omitempty"`
 
-	Composites []*QueryLog `json:",omitempty"`
+	Composites []*LookupLog `json:",omitempty"`
 }
 
-// LookupLog describes a iterative resolution
-type LookupLog struct {
-	Query       *Question
-	DNSSECValid bool
-	Started     time.Time
-	Latency     time.Duration
-	Rcode       uint16
-
-	Composites []*QueryLog
+func newLookupLog(q *Question, ns *Nameserver) *LookupLog {
+	return &LookupLog{
+		Query:   q,
+		NS:      ns,
+		Started: time.Now(),
+	}
 }
 
 // Answer contains the answer to a iterative resolution performed
@@ -137,8 +134,8 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 	return rr
 }
 
-func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Nameserver) (*dns.Msg, *QueryLog, error) {
-	ql := &QueryLog{Query: q, NS: auth}
+func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Nameserver) (*dns.Msg, *LookupLog, error) {
+	ql := newLookupLog(q, auth)
 	s := time.Now()
 	defer func() { ql.Latency = time.Since(s) }()
 	m := new(dns.Msg)
@@ -174,26 +171,26 @@ func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Names
 	return r, ql, nil
 }
 
-func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*Nameserver, error) {
+func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*Nameserver, *LookupLog, error) {
 	// BUG(roland): LookupLog for lookupNS calls isn't included in parent chain
 	// BUG(roland): There is no maximum depth to Lookup -> lookupNS -> Lookup calls, looping is possible
 	// BUG(roland): I'm not sure how the lookup of a NS addr should be taken into account in terms of the
 	//              dnssec chain
-	r, _, err := rr.Lookup(ctx, Question{Name: name, Type: dns.TypeA})
+	r, log, err := rr.Lookup(ctx, Question{Name: name, Type: dns.TypeA})
 	if err != nil {
-		return nil, err
+		return nil, log, err
 	}
 	if r.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("Authority lookup failed for %s: %s", name, dns.RcodeToString[r.Rcode])
+		return nil, log, fmt.Errorf("Authority lookup failed for %s: %s", name, dns.RcodeToString[r.Rcode])
 	}
 	if len(r.Answer) == 0 {
-		return nil, ErrNoAuthorityAddress
+		return nil, log, ErrNoAuthorityAddress
 	}
 	addresses := extractRRSet(r.Answer, name, dns.TypeA)
 	if len(addresses) == 0 {
-		return nil, ErrNoAuthorityAddress
+		return nil, log, ErrNoAuthorityAddress
 	}
-	return &Nameserver{Name: name, Addr: addresses[mrand.Intn(len(addresses))].(*dns.A).A.String()}, nil // ewwww
+	return &Nameserver{Name: name, Addr: addresses[mrand.Intn(len(addresses))].(*dns.A).A.String()}, log, nil
 }
 
 func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]int, map[string]string) {
@@ -228,31 +225,31 @@ func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string
 	return zones, minTTLs, nsToZone
 }
 
-func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (*Nameserver, error) {
+func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (*Nameserver, *LookupLog, error) {
 	zones, _, nsToZone := splitAuthsByZone(auths, extras, rr.useIPv6)
 	if len(zones) == 0 {
 		if len(nsToZone) == 0 {
-			return nil, ErrNoNSAuthorties
+			return nil, nil, ErrNoNSAuthorties
 		}
 		var ns, z string
 		// abuse how ranging over maps works to select a 'random' element
 		for ns, z = range nsToZone {
 			break
 		}
-		a, err := rr.lookupNS(ctx, ns)
+		a, log, err := rr.lookupNS(ctx, ns)
 		if err != nil {
-			return nil, err
+			return nil, log, err
 		}
 		a.Zone = z
-		return a, nil
+		return a, log, nil
 	}
 	// abuse how ranging over maps works to select a 'random' element
 	for ns, z := range nsToZone {
 		if len(zones[z]) > 0 {
-			return &Nameserver{ns, zones[z][mrand.Intn(len(zones[z]))], z}, nil
+			return &Nameserver{ns, zones[z][mrand.Intn(len(zones[z]))], z}, nil, nil
 		}
 	}
-	return nil, ErrNoNSAuthorties
+	return nil, nil, ErrNoNSAuthorties
 }
 
 func extractAnswer(m *dns.Msg, authenticated bool) *Answer {
@@ -270,7 +267,7 @@ func extractAnswer(m *dns.Msg, authenticated bool) *Answer {
 // If responses are found in the underlying cache they will be used instead of
 // sending messages to remote nameservers.
 func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *LookupLog, error) {
-	ll := &LookupLog{Query: &q, Started: time.Now()}
+	ll := newLookupLog(&q, nil)
 
 	authority := &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
 
@@ -354,8 +351,11 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 
 		// Referral response
 		log.Referral = true
-		// BUG(roland): NSEC# DS delegation denials aren't checked
-		authority, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
+		var authLog *LookupLog
+		authority, authLog, err = rr.pickAuthority(ctx, r.Ns, r.Extra)
+		if authLog != nil {
+			log.Composites = append(log.Composites, authLog)
+		}
 		if err != nil {
 			log.Error = err.Error()
 			return nil, ll, err

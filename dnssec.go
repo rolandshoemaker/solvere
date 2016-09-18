@@ -20,7 +20,7 @@ var (
 	ErrBadAnswer              = errors.New("solvere: Query response returned a non-zero RCODE")
 )
 
-func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *Nameserver, parentDSSet []dns.RR) (*QueryLog, error) {
+func (rr *RecursiveResolver) checkDNSKEY(ctx context.Context, m *dns.Msg, auth *Nameserver, parentDSSet []dns.RR) (*LookupLog, error) {
 	q := &Question{Name: auth.Zone, Type: dns.TypeDNSKEY}
 	r, log, err := rr.query(ctx, q, auth)
 	if err != nil {
