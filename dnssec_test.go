@@ -260,7 +260,6 @@ func TestVerifyRRSIG(t *testing.T) {
 	keyMap := map[uint16]*dns.DNSKEY{}
 	keyMap[k.KeyTag()] = k
 
-	year68 := int64(1 << 31)
 	n := time.Now().UTC().Unix()
 	mod := (n / year68) - 1
 	if mod < 0 {

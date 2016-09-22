@@ -2,6 +2,7 @@ package solvere
 
 import (
 	"crypto/sha1"
+	"math"
 	"sync"
 	"time"
 
@@ -15,7 +16,11 @@ func hashQuestion(q *Question) [sha1.Size]byte {
 	return sha1.Sum(inp)
 }
 
-func minTTL(a []dns.RR) int {
+const (
+	year68 = int64(1 << 31)
+)
+
+func minTTL(a []dns.RR, clk clock.Clock) int {
 	var min *uint32
 	for _, r := range a {
 		if min == nil {
@@ -24,6 +29,19 @@ func minTTL(a []dns.RR) int {
 		}
 		if r.Header().Ttl < *min {
 			min = &r.Header().Ttl
+		}
+		if r.Header().Rrtype == dns.TypeRRSIG {
+			// if expiration is lower than Ttl then use that instead so we always
+			// use fresh signatures
+			rr := r.(*dns.RRSIG)
+			n := clk.Now().UTC().Unix()
+			mod := (int64(rr.Expiration) - n) / year68
+			t := int64(rr.Expiration) + (mod * year68)
+			expiresIn := (t - n) / 1000000000 // convert to seconds
+			if expiresIn > 0 && expiresIn < math.MaxUint32 && uint32(expiresIn) < *min {
+				uei := uint32(expiresIn)
+				min = &uei
+			}
 		}
 	}
 	if min == nil {
@@ -111,9 +129,9 @@ func (bc *BasicCache) Add(q *Question, answer *Answer, forever bool) {
 	id := hashQuestion(q)
 	var ttl int
 	if !forever {
-		ttl = minTTL(append(answer.Answer, append(answer.Additional, answer.Authority...)...))
+		ttl = minTTL(append(answer.Answer, append(answer.Additional, answer.Authority...)...), bc.clk)
 		if ttl == 0 {
-			return // ???
+			return
 		}
 	}
 	// should filter out OPT records here

@@ -17,12 +17,28 @@ func TestMinTTL(t *testing.T) {
 		&dns.A{Hdr: dns.RR_Header{Ttl: 5}},
 		&dns.A{Hdr: dns.RR_Header{Ttl: 1}},
 	}
-	min := minTTL(rrSet)
+	min := minTTL(rrSet, clock.Default())
 	if min != 1 {
 		t.Fatalf("minTTL produced the wrong TTL: expected %d, got %d", 1, min)
 	}
-	if minTTL([]dns.RR{}) != 0 {
+	if minTTL([]dns.RR{}, clock.Default()) != 0 {
 		t.Fatalf("minTTL produced a non-zero TTL with a empty RR set")
+	}
+
+	fc := clock.NewFake()
+	n := time.Now().Add(time.Second).UTC().Unix()
+	mod := (n / year68) - 1
+	if mod < 0 {
+		mod = 0
+	}
+	e := uint32(n - (mod * year68))
+	rrSet = []dns.RR{
+		&dns.A{Hdr: dns.RR_Header{Ttl: 5}},
+		&dns.RRSIG{Hdr: dns.RR_Header{Ttl: 4, Rrtype: dns.TypeRRSIG}, Expiration: e},
+	}
+	min = minTTL(rrSet, fc)
+	if min != 1 {
+		t.Fatalf("minTTL didn't account for RRSIG expiring before TTL: wanted %d, got %d", 1, min)
 	}
 }
 
