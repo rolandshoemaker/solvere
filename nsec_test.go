@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
+	"github.com/miekg/dns"
 )
 
 func makeNSEC3(name, next string, optOut bool, types []uint16) *dns.NSEC3 {

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
+	"github.com/miekg/dns"
 
 	"github.com/jmhodges/clock"
 	"golang.org/x/net/context"

@@ -1,7 +1,8 @@
 # Relevant DNS RFCs
 
 A slew of RFCs dictate various aspects of the behavior of a recursive DNS resolver.
-This list should contain _most of them_, but I'm not making any promises.
+This list should contain _most of them_, but this should not be considered a definitive
+list.
 
 ## Basics
 

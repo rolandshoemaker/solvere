@@ -7,7 +7,7 @@ package hints
 import (
 	"net"
 
-	"github.com/rolandshoemaker/dns" // revert to miekg when tokenUpper PR lands
+	"github.com/miekg/dns"
 )
 
 // RootKeys contains the DNSKEY records for the root zone

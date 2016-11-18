@@ -13,16 +13,8 @@
 			"importpath": "github.com/miekg/dns",
 			"repository": "https://github.com/miekg/dns",
 			"vcs": "git",
-			"revision": "db96a2b759cdef4f11a34506a42eb8d1290c598e",
+			"revision": "58f52c57ce9df13460ac68200cef30a008b9c468",
 			"branch": "master",
-			"notests": true
-		},
-		{
-			"importpath": "github.com/rolandshoemaker/dns",
-			"repository": "https://github.com/rolandshoemaker/dns",
-			"vcs": "git",
-			"revision": "810ee96017cbb53ec7491ece3b9a0a1d9fb6209c",
-			"branch": "token-fix",
 			"notests": true
 		},
 		{
