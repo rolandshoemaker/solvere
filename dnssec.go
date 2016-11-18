@@ -1,12 +1,11 @@
 package solvere
 
 import (
+	"context"
 	"errors"
 	"time"
 
 	"github.com/miekg/dns"
-
-	"golang.org/x/net/context"
 )
 
 var (

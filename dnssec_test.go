@@ -1,6 +1,7 @@
 package solvere
 
 import (
+	"context"
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -13,7 +14,6 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/jmhodges/clock"
-	"golang.org/x/net/context"
 )
 
 var eMu = new(sync.Mutex)

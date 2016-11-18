@@ -4,6 +4,7 @@ package solvere
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"golang.org/x/net/context"
 )
 
 func init() {

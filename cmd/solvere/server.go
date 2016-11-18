@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
 	"github.com/miekg/dns"
-	"golang.org/x/net/context"
 
 	"github.com/rolandshoemaker/solvere"
 )

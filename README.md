@@ -4,4 +4,6 @@
 
 A simple Golang package and standalone server for recursive DNS resolution.
 
+Golang >= 1.7 is required to make use of the new standard library `context` package.
+
 _Until there is a full test suite you should really *not trust this*._
