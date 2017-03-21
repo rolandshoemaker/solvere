@@ -262,6 +262,29 @@ func extractAnswer(m *dns.Msg, authenticated bool) *Answer {
 	}
 }
 
+func isAlias(answer []dns.RR, q Question) (bool, string) {
+	filtered := filterRRSet(answer, dns.TypeRRSIG)
+	if len(filtered) != 1 {
+		return false, ""
+	}
+	switch alias := filtered[0].(type) {
+	case *dns.CNAME:
+		if q.Type == dns.TypeCNAME {
+			return false, ""
+		}
+		return true, alias.Target
+	case *dns.DNAME:
+		if q.Type == dns.TypeDNAME {
+			return false, ""
+		}
+		if !strings.HasSuffix(q.Name, alias.Hdr.Name) {
+			return false, ""
+		}
+		return true, strings.TrimSuffix(q.Name, alias.Hdr.Name) + alias.Target
+	}
+	return false, ""
+}
+
 // Lookup a Question iteratively. All upstream responses are validated
 // and a DNSSEC chain is built if the RecursiveResolver was initialized to do so.
 // If responses are found in the underlying cache they will be used instead of
@@ -321,8 +344,11 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 
 		// good response
 		if len(r.Answer) > 0 {
-			// BUG(roland): if after stripping dnssec records the only remaining record is a CNAME and the
-			//              question type wasn't CNAME then the alias should be chased
+			if ok, canonicalName := isAlias(r.Answer, q); ok {
+				authority = &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
+				q.Name = canonicalName
+				continue
+			}
 			if !log.CacheHit {
 				if rr.cache != nil {
 					go rr.cache.Add(&q, &Answer{r.Answer, r.Ns, r.Extra, r.Rcode, validated}, false)
@@ -374,6 +400,20 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		}
 	}
 	return nil, ll, ErrTooManyReferrals
+}
+
+func filterRRSet(in []dns.RR, rrTypes ...uint16) []dns.RR {
+	tMap := make(map[uint16]struct{}, len(rrTypes))
+	for _, rrType := range rrTypes {
+		tMap[rrType] = struct{}{}
+	}
+	out := []dns.RR{}
+	for _, r := range in {
+		if _, present := tMap[r.Header().Rrtype]; !present {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func extractRRSet(in []dns.RR, name string, t ...uint16) []dns.RR {

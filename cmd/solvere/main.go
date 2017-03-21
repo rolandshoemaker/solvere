@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"time"
 
@@ -11,10 +12,13 @@ import (
 )
 
 func main() {
+	listenAddr := flag.String("listen", "127.0.0.1:53", "")
+	flag.Parse()
+
 	s := &server{solvere.NewRecursiveResolver(false, true, hints.RootNameservers, hints.RootKeys, solvere.NewBasicCache())}
 	dns.HandleFunc(".", s.handler)
 	dnsServer := &dns.Server{
-		Addr:         "0.0.0.0:53",
+		Addr:         *listenAddr,
 		Net:          "udp",
 		ReadTimeout:  time.Millisecond,
 		WriteTimeout: time.Millisecond,

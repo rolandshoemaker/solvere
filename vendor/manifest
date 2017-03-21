@@ -13,7 +13,7 @@
 			"importpath": "github.com/miekg/dns",
 			"repository": "https://github.com/miekg/dns",
 			"vcs": "git",
-			"revision": "58f52c57ce9df13460ac68200cef30a008b9c468",
+			"revision": "2d7eb4f050c25a6d4401af9abd939d42ac773331",
 			"branch": "master",
 			"notests": true
 		}
