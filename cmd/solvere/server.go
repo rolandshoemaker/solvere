@@ -30,6 +30,9 @@ func (s *server) handler(w dns.ResponseWriter, r *dns.Msg) {
 	ctx := context.TODO()
 
 	a, log, err := s.rr.Lookup(ctx, q)
+	if err != nil {
+		fmt.Println("Query failed:", err)
+	}
 	j, jerr := json.Marshal(log)
 	if jerr != nil {
 		fmt.Println("err encoding log message")

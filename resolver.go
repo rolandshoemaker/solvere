@@ -262,10 +262,45 @@ func extractAnswer(m *dns.Msg, authenticated bool) *Answer {
 	}
 }
 
+func allType(a []dns.RR, t uint16) bool {
+	for _, rr := range a {
+		if rr.Header().Rrtype != t {
+			return false
+		}
+	}
+	return true
+}
+
+func collapseCNAMEChain(qname string, in []dns.RR) string {
+	cnameMap := make(map[string]string, len(in))
+	for _, rr := range in {
+		cname := rr.(*dns.CNAME)
+		cnameMap[cname.Hdr.Name] = cname.Target
+	}
+	var canonical string
+	for {
+		c, ok := cnameMap[qname]
+		if !ok {
+			break
+		}
+		canonical = c
+		qname = canonical
+	}
+	return canonical
+}
+
 func isAlias(answer []dns.RR, q Question) (bool, string) {
 	filtered := filterRRSet(answer, dns.TypeRRSIG)
-	if len(filtered) != 1 {
+	if len(filtered) == 0 {
 		return false, ""
+	}
+	if len(filtered) > 1 {
+		// check if we are being passed a CNAME chain
+		if !allType(filtered, dns.TypeCNAME) || q.Type == dns.TypeCNAME {
+			return false, ""
+		}
+		// collapse CNAME chain
+		return true, collapseCNAMEChain(q.Name, filtered)
 	}
 	switch alias := filtered[0].(type) {
 	case *dns.CNAME:
@@ -298,6 +333,8 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		ll.Latency = time.Since(ll.Started)
 	}()
 
+	aliases := map[string]struct{}{}
+	var chased []dns.RR
 	var parentDSSet []dns.RR
 	for i := 0; i < MaxReferrals; i++ {
 		r, log, err := rr.query(ctx, &q, authority)
@@ -339,14 +376,24 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 					}
 				}
 			}
+			// add chased aliases?
 			return extractAnswer(r, validated), ll, nil
 		}
 
 		// good response
 		if len(r.Answer) > 0 {
 			if ok, canonicalName := isAlias(r.Answer, q); ok {
+				if _, ok := aliases[canonicalName]; ok {
+					// loop
+					err = errors.New("Alias loop detected")
+					log.Error = err.Error()
+					return nil, ll, err
+				}
+				aliases[canonicalName] = struct{}{}
+
 				authority = &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
 				q.Name = canonicalName
+				chased = append(chased, extractRRSet(r.Answer, "", dns.TypeCNAME)...) // ???
 				continue
 			}
 			if !log.CacheHit {
@@ -355,7 +402,10 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 				}
 			}
 
-			// check for alias and chase or do that in RecursiveResolver.query?
+			if len(chased) > 0 {
+				// put aliases at the front of the answer
+				r.Answer = append(chased, r.Answer...)
+			}
 			return extractAnswer(r, validated), ll, nil
 		}
 
