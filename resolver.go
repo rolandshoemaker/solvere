@@ -304,11 +304,12 @@ func isAlias(answer []dns.RR, q Question) (bool, string) {
 	}
 	switch alias := filtered[0].(type) {
 	case *dns.CNAME:
-		if q.Type == dns.TypeCNAME {
+		if q.Type == dns.TypeCNAME || q.Name != alias.Hdr.Name {
 			return false, ""
 		}
 		return true, alias.Target
 	case *dns.DNAME:
+		// XXX: Not really sure this is what is meant to happen
 		if q.Type == dns.TypeDNAME {
 			return false, ""
 		}
@@ -336,6 +337,8 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 	aliases := map[string]struct{}{}
 	var chased []dns.RR
 	var parentDSSet []dns.RR
+	// XXX: This whole loop could be split off into its own function in order to pass through
+	// the i when we need to do things like lookupNS which are prone to infinitely looping
 	for i := 0; i < MaxReferrals; i++ {
 		r, log, err := rr.query(ctx, &q, authority)
 		ll.Composites = append(ll.Composites, log)
@@ -384,8 +387,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		if len(r.Answer) > 0 {
 			if ok, canonicalName := isAlias(r.Answer, q); ok {
 				if _, ok := aliases[canonicalName]; ok {
-					// loop
-					err = errors.New("Alias loop detected")
+					err = errors.New("Alias loop detected, aborting")
 					log.Error = err.Error()
 					return nil, ll, err
 				}
@@ -394,6 +396,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 				authority = &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
 				q.Name = canonicalName
 				chased = append(chased, extractRRSet(r.Answer, "", dns.TypeCNAME)...) // ???
+				// add to cache?
 				continue
 			}
 			if !log.CacheHit {
@@ -409,11 +412,12 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 			return extractAnswer(r, validated), ll, nil
 		}
 
-		// NODATA or referral response
 		nsecSet := extractRRSet(r.Ns, "", dns.TypeNSEC3)
-		if len(r.Ns) == 0 {
-			// NODATA response
-			if len(nsecSet) != 0 { // if the zone is signed and this is missing its a failure...
+
+		// NODATA response
+		if len(r.Ns) == 0 || len(nsecSet) == len(r.Ns) {
+			if len(nsecSet) != 0 {
+				// check for proper coverage
 				err = verifyNODATA(&q, nsecSet)
 				if err != nil {
 					log.Error = err.Error()
@@ -422,7 +426,8 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 					return nil, ll, err
 				}
 			}
-			return &Answer{Rcode: dns.RcodeSuccess, Authenticated: validated}, ll, nil // ignore anything in additional section
+			// ignore anything in additional section
+			return &Answer{Rcode: dns.RcodeSuccess, Authenticated: validated}, ll, nil
 		}
 
 		// Referral response
@@ -479,24 +484,6 @@ func extractRRSet(in []dns.RR, name string, t ...uint16) []dns.RR {
 			}
 			out = append(out, r)
 		}
-	}
-	return out
-}
-
-func extractAndMapRRSet(in []dns.RR, name string, t ...uint16) map[uint16][]dns.RR {
-	out := make(map[uint16][]dns.RR, len(t))
-	for _, rt := range t {
-		out[rt] = []dns.RR{}
-	}
-	for _, r := range in {
-		rt := r.Header().Rrtype
-		if _, present := out[rt]; !present {
-			continue
-		}
-		if name != "" && name != r.Header().Name {
-			continue
-		}
-		out[rt] = append(out[rt], r)
 	}
 	return out
 }

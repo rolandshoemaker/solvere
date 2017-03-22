@@ -165,6 +165,10 @@ func (bc *BasicCache) getEntry(q *Question) (*cacheEntry, bool) {
 // Get returns the response for a question if it exists in the cache
 func (bc *BasicCache) Get(q *Question) *Answer {
 	if entry, present := bc.getEntry(q); present {
+		if entry.expired(bc.clk) {
+			bc.del(hashQuestion(q))
+			return nil
+		}
 		entry.mu.Lock()
 		defer entry.mu.Unlock()
 		return entry.answer

@@ -162,7 +162,6 @@ func (rr *RecursiveResolver) checkSignatures(ctx context.Context, m *dns.Msg, au
 	if !log.CacheHit {
 		if rr.cache != nil {
 			addCache()
-			// go rr.cache.Add(q, &Answer{r.Answer, r.Ns, r.Extra, dns.RcodeSuccess, true}, false)
 		}
 	}
 

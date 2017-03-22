@@ -91,7 +91,17 @@ func TestCache(t *testing.T) {
 
 	a = Answer{Answer: []dns.RR{&dns.A{Hdr: dns.RR_Header{}, A: net.IP{1, 2, 3, 4}}}}
 	cache.Add(&q, &a, false)
+	ca = cache.Get(&q)
 	if ca != nil {
-		t.Fatalf("Empty answer returned non-nil Answer: %#v", ca)
+		t.Fatalf("Answer with 0 minTTL stored/returned: %#v", ca)
 	}
+
+	a = Answer{Answer: []dns.RR{&dns.A{Hdr: dns.RR_Header{Ttl: 10}, A: net.IP{1, 2, 3, 4}}}}
+	cache.Add(&q, &a, false)
+	fc.Add(time.Second * 20)
+	ca = cache.Get(&q)
+	if ca != nil {
+		t.Fatalf("Answer with expired TTL returned: %#v", ca)
+	}
+
 }
