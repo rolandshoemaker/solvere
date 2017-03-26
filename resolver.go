@@ -273,7 +273,6 @@ func allOfType(a []dns.RR, t uint16) bool {
 }
 
 func collapseCNAMEChain(qname string, in []dns.RR) (string, []dns.RR) {
-	// XXX: pass the records that were actually used back to caller
 	var chased []dns.RR
 	cnameMap := make(map[string]*dns.CNAME, len(in))
 	for _, rr := range in {
@@ -295,8 +294,9 @@ func collapseCNAMEChain(qname string, in []dns.RR) (string, []dns.RR) {
 
 const maxDomainLength = 256
 
+var dnameTooLong = errors.New("DNAME substitution creates too long sname")
+
 func isAlias(answer []dns.RR, q Question) (bool, string, []dns.RR, error) {
-	// XXX: pass aliases that were used back to caller to include in answer
 	filtered := filterRRSet(answer, dns.TypeRRSIG)
 	if len(filtered) == 0 {
 		return false, "", nil, nil
@@ -329,7 +329,7 @@ func isAlias(answer []dns.RR, q Question) (bool, string, []dns.RR, error) {
 		// XXX: check that substitution doesn't overflow legal length
 		sname := strings.TrimSuffix(q.Name, alias.Hdr.Name) + alias.Target
 		if len(sname) > maxDomainLength {
-			return false, "", nil, errors.New("DNAME substitution creates too long sname")
+			return false, "", nil, dnameTooLong
 		}
 		return true, sname, []dns.RR{alias}, nil
 	}
