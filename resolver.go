@@ -272,12 +272,13 @@ func allOfType(a []dns.RR, t uint16) bool {
 	return true
 }
 
-func collapseCNAMEChain(qname string, in []dns.RR) string {
+func collapseCNAMEChain(qname string, in []dns.RR) (string, []dns.RR) {
 	// XXX: pass the records that were actually used back to caller
-	cnameMap := make(map[string]string, len(in))
+	var chased []dns.RR
+	cnameMap := make(map[string]*dns.CNAME, len(in))
 	for _, rr := range in {
 		cname := rr.(*dns.CNAME)
-		cnameMap[cname.Hdr.Name] = cname.Target
+		cnameMap[cname.Hdr.Name] = cname
 	}
 	var canonical string
 	for {
@@ -285,19 +286,20 @@ func collapseCNAMEChain(qname string, in []dns.RR) string {
 		if !ok {
 			break
 		}
-		canonical = c
+		canonical = c.Target
 		qname = canonical
+		chased = append(chased, c)
 	}
-	return canonical
+	return canonical, chased
 }
 
 const maxDomainLength = 256
 
-func isAlias(answer []dns.RR, q Question) (bool, string, error) {
+func isAlias(answer []dns.RR, q Question) (bool, string, []dns.RR, error) {
 	// XXX: pass aliases that were used back to caller to include in answer
 	filtered := filterRRSet(answer, dns.TypeRRSIG)
 	if len(filtered) == 0 {
-		return false, "", nil
+		return false, "", nil, nil
 	}
 	if len(filtered) > 1 {
 		// check if answer is a CNAME chain that we can collapse
@@ -306,31 +308,32 @@ func isAlias(answer []dns.RR, q Question) (bool, string, error) {
 			// XXX: also possible this contains more than 1 DNAME, is
 			//      that valid?
 			// XXX: this breaks with a DNAME + synthesized CNAME...
-			return false, "", nil
+			return false, "", nil, nil
 		}
-		return true, collapseCNAMEChain(q.Name, filtered), nil
+		sname, chased := collapseCNAMEChain(q.Name, filtered)
+		return true, sname, chased, nil
 	}
 	switch alias := filtered[0].(type) {
 	case *dns.CNAME:
 		if q.Type == dns.TypeCNAME || q.Name != alias.Hdr.Name {
-			return false, "", nil
+			return false, "", nil, nil
 		}
-		return true, alias.Target, nil
+		return true, alias.Target, []dns.RR{alias}, nil
 	case *dns.DNAME:
 		if q.Type == dns.TypeDNAME {
-			return false, "", nil
+			return false, "", nil, nil
 		}
 		if !strings.HasSuffix(q.Name, alias.Hdr.Name) {
-			return false, "", nil
+			return false, "", nil, nil
 		}
 		// XXX: check that substitution doesn't overflow legal length
 		sname := strings.TrimSuffix(q.Name, alias.Hdr.Name) + alias.Target
 		if len(sname) > maxDomainLength {
-			return false, "", errors.New("DNAME substitution creates too long sname")
+			return false, "", nil, errors.New("DNAME substitution creates too long sname")
 		}
-		return true, sname, nil
+		return true, sname, []dns.RR{alias}, nil
 	}
-	return false, "", nil
+	return false, "", nil, nil
 }
 
 // Lookup a Question iteratively. All upstream responses are validated
@@ -398,7 +401,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 
 		// good response
 		if len(r.Answer) > 0 {
-			if ok, canonicalName, err := isAlias(r.Answer, q); ok {
+			if ok, canonicalName, chasedRR, err := isAlias(r.Answer, q); ok {
 				if _, ok := aliases[canonicalName]; ok {
 					err = errors.New("Alias loop detected, aborting")
 					log.Error = err.Error()
@@ -408,9 +411,8 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 
 				authority = &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
 				q.Name = canonicalName
-				// XXX: get this data from isAlias instead of just using everything
-				chased = append(chased, extractRRSet(r.Answer, "", dns.TypeCNAME)...)
-				// XXX: cache aliases
+				chased = append(chased, chasedRR...)
+				// XXX: cache alias answer
 				continue
 			} else if err != nil {
 				log.Error = err.Error()
