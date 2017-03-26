@@ -88,7 +88,7 @@ type Answer struct {
 	Authenticated bool
 }
 
-// Nameserver describes a upstream authoritative nameserver
+// Nameserver describes an authoritative nameserver
 type Nameserver struct {
 	Name string
 	Addr string
@@ -129,6 +129,8 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 		}
 	}
 	// Add root DNSSEC keys to cache indefinitely
+	// XXX: if these keys are expired (how to tell?) should block on fetching
+	//      new ones + verifying the roll-over
 	if rr.cache != nil {
 		rr.cache.Add(&Question{Name: ".", Type: dns.TypeDNSKEY}, &Answer{rootKeys, nil, nil, dns.RcodeSuccess, true}, true)
 	}
@@ -165,7 +167,7 @@ func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Names
 	for _, section := range [][]dns.RR{r.Answer, r.Ns} {
 		for _, record := range section {
 			if record.Header().Rrtype != dns.TypeOPT && !strings.HasSuffix(record.Header().Name, auth.Zone) {
-				return nil, ql, ErrOutOfBailiwick // or just strip invalid records...?
+				return nil, ql, ErrOutOfBailiwick // XXX: or just strip invalid records...?
 			}
 		}
 	}
@@ -173,9 +175,9 @@ func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Names
 }
 
 func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*Nameserver, *LookupLog, error) {
-	// BUG(roland): There is no maximum depth to Lookup -> lookupNS -> Lookup calls, looping is possible
-	// BUG(roland): I'm not sure how the lookup of a NS addr should be taken into account in terms of the
-	//              dnssec chain
+	// XXX: There is no maximum depth to Lookup -> lookupNS -> Lookup calls, looping is possible
+	// XXX: I'm not sure how the lookup of a NS addr should be taken into account in terms of the
+	//      dnssec chain (probably if not signed the chain cannot be considered authenticated?)
 	r, log, err := rr.Lookup(ctx, Question{Name: name, Type: dns.TypeA})
 	if err != nil {
 		return nil, log, err
@@ -193,9 +195,8 @@ func (rr *RecursiveResolver) lookupNS(ctx context.Context, name string) (*Namese
 	return &Nameserver{Name: name, Addr: addresses[mrand.Intn(len(addresses))].(*dns.A).A.String()}, log, nil
 }
 
-func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]int, map[string]string) {
+func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string][]string, map[string]string) {
 	zones := make(map[string][]string)
-	minTTLs := make(map[string]int)
 	nsToZone := make(map[string]string)
 
 	for _, rr := range auths {
@@ -216,17 +217,17 @@ func splitAuthsByZone(auths []dns.RR, extras []dns.RR, useIPv6 bool) (map[string
 					zones[zone] = append(zones[zone], a.AAAA.String())
 				}
 			}
-			if minTTLs[zone] == 0 || int(rr.Header().Ttl) < minTTLs[zone] {
-				minTTLs[zone] = int(rr.Header().Ttl)
-			}
 		}
 	}
 
-	return zones, minTTLs, nsToZone
+	return zones, nsToZone
 }
 
 func (rr *RecursiveResolver) pickAuthority(ctx context.Context, auths []dns.RR, extras []dns.RR) (*Nameserver, *LookupLog, error) {
-	zones, _, nsToZone := splitAuthsByZone(auths, extras, rr.useIPv6)
+	// XXX: this ignores general concept of an 'infrastructure' cache which
+	//      tracks authority performance and uses it as a metric to pick a
+	//      authority. may want to get fancier at some point...
+	zones, nsToZone := splitAuthsByZone(auths, extras, rr.useIPv6)
 	if len(zones) == 0 {
 		if len(nsToZone) == 0 {
 			return nil, nil, ErrNoNSAuthorties
@@ -262,7 +263,7 @@ func extractAnswer(m *dns.Msg, authenticated bool) *Answer {
 	}
 }
 
-func allType(a []dns.RR, t uint16) bool {
+func allOfType(a []dns.RR, t uint16) bool {
 	for _, rr := range a {
 		if rr.Header().Rrtype != t {
 			return false
@@ -272,6 +273,7 @@ func allType(a []dns.RR, t uint16) bool {
 }
 
 func collapseCNAMEChain(qname string, in []dns.RR) string {
+	// XXX: pass the records that were actually used back to caller
 	cnameMap := make(map[string]string, len(in))
 	for _, rr := range in {
 		cname := rr.(*dns.CNAME)
@@ -289,42 +291,52 @@ func collapseCNAMEChain(qname string, in []dns.RR) string {
 	return canonical
 }
 
-func isAlias(answer []dns.RR, q Question) (bool, string) {
+const maxDomainLength = 256
+
+func isAlias(answer []dns.RR, q Question) (bool, string, error) {
+	// XXX: pass aliases that were used back to caller to include in answer
 	filtered := filterRRSet(answer, dns.TypeRRSIG)
 	if len(filtered) == 0 {
-		return false, ""
+		return false, "", nil
 	}
 	if len(filtered) > 1 {
-		// check if we are being passed a CNAME chain
-		if !allType(filtered, dns.TypeCNAME) || q.Type == dns.TypeCNAME {
-			return false, ""
+		// check if answer is a CNAME chain that we can collapse
+		if !allOfType(filtered, dns.TypeCNAME) || q.Type == dns.TypeCNAME {
+			// Answer contains mixed records (malformed answer)
+			// XXX: also possible this contains more than 1 DNAME, is
+			//      that valid?
+			// XXX: this breaks with a DNAME + synthesized CNAME...
+			return false, "", nil
 		}
-		// collapse CNAME chain
-		return true, collapseCNAMEChain(q.Name, filtered)
+		return true, collapseCNAMEChain(q.Name, filtered), nil
 	}
 	switch alias := filtered[0].(type) {
 	case *dns.CNAME:
 		if q.Type == dns.TypeCNAME || q.Name != alias.Hdr.Name {
-			return false, ""
+			return false, "", nil
 		}
-		return true, alias.Target
+		return true, alias.Target, nil
 	case *dns.DNAME:
-		// XXX: Not really sure this is what is meant to happen
 		if q.Type == dns.TypeDNAME {
-			return false, ""
+			return false, "", nil
 		}
 		if !strings.HasSuffix(q.Name, alias.Hdr.Name) {
-			return false, ""
+			return false, "", nil
 		}
-		return true, strings.TrimSuffix(q.Name, alias.Hdr.Name) + alias.Target
+		// XXX: check that substitution doesn't overflow legal length
+		sname := strings.TrimSuffix(q.Name, alias.Hdr.Name) + alias.Target
+		if len(sname) > maxDomainLength {
+			return false, "", errors.New("DNAME substitution creates too long sname")
+		}
+		return true, sname, nil
 	}
-	return false, ""
+	return false, "", nil
 }
 
 // Lookup a Question iteratively. All upstream responses are validated
 // and a DNSSEC chain is built if the RecursiveResolver was initialized to do so.
-// If responses are found in the underlying cache they will be used instead of
-// sending messages to remote nameservers.
+// If responses are found in the question/answer cache they will be used instead
+// of sending messages to remote nameservers.
 func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *LookupLog, error) {
 	ll := newLookupLog(&q, nil)
 
@@ -337,8 +349,9 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 	aliases := map[string]struct{}{}
 	var chased []dns.RR
 	var parentDSSet []dns.RR
-	// XXX: This whole loop could be split off into its own function in order to pass through
-	// the i when we need to do things like lookupNS which are prone to infinitely looping
+	// XXX: This whole loop could be split off into its own function in order
+	//      to pass through the i when we need to do things like lookupNS which
+	//      are prone to infinitely looping
 	for i := 0; i < MaxReferrals; i++ {
 		r, log, err := rr.query(ctx, &q, authority)
 		ll.Composites = append(ll.Composites, log)
@@ -367,6 +380,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		ll.DNSSECValid = validated
 
 		if r.Rcode != dns.RcodeSuccess {
+			// XXX: cache name error?
 			if r.Rcode == dns.RcodeNameError {
 				nsecSet := extractRRSet(r.Ns, "", dns.TypeNSEC3)
 				if len(nsecSet) != 0 { // if the zone is signed and this is missing its a failure...
@@ -379,13 +393,12 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 					}
 				}
 			}
-			// add chased aliases?
 			return extractAnswer(r, validated), ll, nil
 		}
 
 		// good response
 		if len(r.Answer) > 0 {
-			if ok, canonicalName := isAlias(r.Answer, q); ok {
+			if ok, canonicalName, err := isAlias(r.Answer, q); ok {
 				if _, ok := aliases[canonicalName]; ok {
 					err = errors.New("Alias loop detected, aborting")
 					log.Error = err.Error()
@@ -395,14 +408,16 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 
 				authority = &rr.rootNameservers[mrand.Intn(len(rr.rootNameservers))]
 				q.Name = canonicalName
-				chased = append(chased, extractRRSet(r.Answer, "", dns.TypeCNAME)...) // ???
-				// add to cache?
+				// XXX: get this data from isAlias instead of just using everything
+				chased = append(chased, extractRRSet(r.Answer, "", dns.TypeCNAME)...)
+				// XXX: cache aliases
 				continue
+			} else if err != nil {
+				log.Error = err.Error()
+				return nil, ll, err
 			}
-			if !log.CacheHit {
-				if rr.cache != nil {
-					go rr.cache.Add(&q, &Answer{r.Answer, r.Ns, r.Extra, r.Rcode, validated}, false)
-				}
+			if !log.CacheHit && rr.cache != nil {
+				go rr.cache.Add(&q, &Answer{r.Answer, r.Ns, r.Extra, r.Rcode, validated}, false)
 			}
 
 			if len(chased) > 0 {
@@ -426,7 +441,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 					return nil, ll, err
 				}
 			}
-			// ignore anything in additional section
+			// ignore anything in additional section (?)
 			return &Answer{Rcode: dns.RcodeSuccess, Authenticated: validated}, ll, nil
 		}
 
@@ -441,7 +456,7 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 			log.Error = err.Error()
 			return nil, ll, err
 		}
-		if len(nsecSet) != 0 { // if the zone is signed and this is missing its a failure...
+		if len(nsecSet) != 0 {
 			err = verifyDelegation(authority.Zone, nsecSet)
 			if err != nil {
 				log.Error = err.Error()
@@ -449,9 +464,15 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 				ll.DNSSECValid = false
 				return nil, ll, err
 			}
+		} else if len(parentDSSet) > 0 {
+			err := errors.New("unsigned delegation in signed zone without NSEC records")
+			log.Error = err.Error()
+			return nil, ll, err
 		}
 		if i == 0 || len(parentDSSet) > 0 {
 			parentDSSet = extractRRSet(r.Ns, authority.Zone, dns.TypeDS)
+		} else if i > 0 { // XXX: is this right?
+			parentDSSet = nil
 		}
 	}
 	return nil, ll, ErrTooManyReferrals
