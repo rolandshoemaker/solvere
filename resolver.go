@@ -131,7 +131,7 @@ func NewRecursiveResolver(useIPv6 bool, useDNSSEC bool, rootHints []dns.RR, root
 	// Add root DNSSEC keys to cache indefinitely
 	// XXX: if these keys are expired (how to tell?) should block on fetching
 	//      new ones + verifying the roll-over
-	if rr.cache != nil {
+	if rr.cache != nil && rootKeys != nil {
 		rr.cache.Add(&Question{Name: ".", Type: dns.TypeDNSKEY}, &Answer{rootKeys, nil, nil, dns.RcodeSuccess, true}, true)
 	}
 	return rr
@@ -372,14 +372,16 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 		if log.CacheHit {
 			validated = log.DNSSECValid
 		}
-		if (i == 0 || len(parentDSSet) > 0) && !log.CacheHit {
-			dkLog, err := rr.checkSignatures(ctx, r, authority, parentDSSet)
-			log.Composites = append(log.Composites, dkLog)
-			if err != nil {
-				log.Error = err.Error()
-				return nil, ll, err
+		if rr.useDNSSEC {
+			if (i == 0 || len(parentDSSet) > 0) && !log.CacheHit {
+				dkLog, err := rr.checkSignatures(ctx, r, authority, parentDSSet)
+				log.Composites = append(log.Composites, dkLog)
+				if err != nil {
+					log.Error = err.Error()
+					return nil, ll, err
+				}
+				validated = true
 			}
-			validated = true
 		}
 		log.DNSSECValid = validated
 		ll.DNSSECValid = validated
