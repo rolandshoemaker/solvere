@@ -157,7 +157,7 @@ func (rr *RecursiveResolver) query(ctx context.Context, q *Question, auth *Names
 			return m, ql, nil
 		}
 	}
-	r, _, err := rr.c.Exchange(m, net.JoinHostPort(auth.Addr, dnsPort))
+	r, _, err := rr.c.ExchangeContext(ctx, m, net.JoinHostPort(auth.Addr, dnsPort))
 	if err != nil {
 		return nil, ql, err
 	}
@@ -358,10 +358,12 @@ func (rr *RecursiveResolver) Lookup(ctx context.Context, q Question) (*Answer, *
 	for i := 0; i < MaxReferrals; i++ {
 		r, log, err := rr.query(ctx, &q, authority)
 		ll.Composites = append(ll.Composites, log)
-		if err != nil && err != dns.ErrTruncated { // if truncated still try...
+		if err != nil { // if truncated still try...
 			log.Error = err.Error()
 			return nil, ll, err
-		} else if err == dns.ErrTruncated {
+		}
+
+		if r.Truncated {
 			log.Truncated = true
 		}
 
