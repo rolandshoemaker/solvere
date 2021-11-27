@@ -1,4 +1,6 @@
-//+build ignore
+//go:build ignore
+// +build ignore
+
 package main
 
 import (
@@ -129,33 +131,33 @@ func main() {
 
 	c := content{Generated: time.Now()}
 
-	tokens := dns.ParseZone(kf, "", "")
-	for x := range tokens {
-		if x.Error != nil {
-			fmt.Fprintf(os.Stderr, "Failed to parse records from key file: %s\n", err)
-			os.Exit(1)
-		}
-		d := x.RR.(*dns.DNSKEY)
+	tokens := dns.NewZoneParser(kf, "", "")
+	x, ok := tokens.Next()
+	for ok {
+		d := x.(*dns.DNSKEY)
 		c.RootKeys = append(c.RootKeys, dk{
-			TTL:       x.RR.Header().Ttl,
+			TTL:       x.Header().Ttl,
 			Flags:     d.Flags,
 			Protocol:  d.Protocol,
 			Algorithm: d.Algorithm,
 			PublicKey: d.PublicKey,
 		})
+		x, ok = tokens.Next()
 	}
-	tokens = dns.ParseZone(nsf, "", "")
-	for x := range tokens {
-		if x.Error != nil {
-			fmt.Fprintf(os.Stderr, "Failed to parse records from nameservers file: %s\n", err)
-			os.Exit(1)
-		}
+	if tokens.Err() != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse records from key file: %s\n", tokens.Err())
+		os.Exit(1)
+	}
+
+	tokens = dns.NewZoneParser(nsf, "", "")
+	x, ok = tokens.Next()
+	for ok {
 		rns := ns{
-			Name:   x.RR.Header().Name,
-			Rrtype: x.RR.Header().Rrtype,
-			TTL:    x.RR.Header().Ttl,
+			Name:   x.Header().Name,
+			Rrtype: x.Header().Rrtype,
+			TTL:    x.Header().Ttl,
 		}
-		switch n := x.RR.(type) {
+		switch n := x.(type) {
 		case *dns.NS:
 			rns.StructType = "NS"
 			rns.Ns = n.Ns
@@ -167,6 +169,11 @@ func main() {
 			rns.AAAA = bytesToString(n.AAAA)
 		}
 		c.RootNameservers = append(c.RootNameservers, rns)
+		x, ok = tokens.Next()
+	}
+	if tokens.Err() != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse records from nameservers file: %s\n", tokens.Err())
+		os.Exit(1)
 	}
 
 	t := template.Must(template.New("hints").Parse(tmpl))
